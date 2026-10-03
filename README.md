@@ -38,8 +38,18 @@ O botão **Test** lista um agente para validar token e workspace.
   `model`, `tools` e `temperature` ficam em *Options* como listas; `stream` não aparece (o node sempre espera a
   resposta completa).
 - **Wait for Completion** (padrão: ligado): a Tess responde em até 100 s; se a execução continuar, o node consulta
-  `/agent-responses/{id}` a cada *Poll Interval* até terminar ou atingir o *Timeout* (padrão 600 s).
+  `/agent-responses/{id}` a cada *Poll Interval* até terminar ou atingir o *Timeout* (padrão 600 s;
+  **0 = sem limite**, vale só o timeout de execução do n8n, se houver).
   Desligado, devolve o ID da execução na hora — consulte depois com *Agent Response → Get*.
+- **Output Format → JSON**: a API da Tess não tem "modo JSON", então o node:
+  1. acrescenta à mensagem a instrução "responda só com JSON válido" (+ o *Expected Structure* e as *Required Keys*);
+  2. extrai o JSON da resposta — aceita blocos ` ```json `, texto antes/depois, objeto ou array;
+  3. confere as *Required Keys* (no objeto ou em cada item do array);
+  4. se inválido, pede a correção **na mesma conversa** (`root_id`) até *Correction Attempts* vezes;
+  5. ainda inválido → **o node falha** (ou devolve `error` com *Continue On Fail*).
+
+  Saída: `output_json` (o JSON já convertido), `output` (texto original), `json_attempts` e `credits` somados de
+  todas as tentativas.
 - **Options**:
   - **Model**, **Tool** e **Temperature**: listas com os valores que o agente escolhido permite (vazio = padrão do
     agente). Só uma ferramenta por execução.

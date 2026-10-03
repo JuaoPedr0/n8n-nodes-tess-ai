@@ -26,6 +26,7 @@ import {
 	memoryFields,
 	memoryOperations,
 } from './descriptions/MemoryDescription';
+import { correctionMessage, extractJson, jsonInstruction, missingKeys } from './JsonOutput';
 import {
 	parseIdList,
 	tessApiRequest,
@@ -74,10 +75,27 @@ async function agentSelectOptions(
 ): Promise<INodePropertyOptions[]> {
 	const question = (await getAgentQuestions.call(this)).find((q) => q.name === questionName);
 	const values = question?.options?.length ? question.options : fallback;
+	const label = questionName === 'temperature' ? temperatureLabel : (v: string) => v;
 	return [
 		{ name: 'Agent Default', value: '' },
-		...values.map((v) => ({ name: String(v), value: String(v) })),
+		...values.map((v) => ({ name: label(String(v)), value: String(v) })),
 	];
+}
+
+function temperatureLabel(value: string): string {
+	const n = Number(value);
+	if (Number.isNaN(n)) return value;
+	const style =
+		n <= 0
+			? 'Most objective'
+			: n <= 0.3
+				? 'Objective'
+				: n <= 0.6
+					? 'Balanced'
+					: n <= 0.85
+						? 'Creative'
+						: 'Most creative';
+	return `${value} — ${style}`;
 }
 
 function fieldTypeOf(q: AgentQuestion): FieldType {
@@ -347,7 +365,27 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 			}
 			messages.push(...(parsed as IDataObject[]));
 		}
-		if (message.trim()) messages.push({ role: 'user', content: message });
+		const outputFormat = wait
+			? (this.getNodeParameter('outputFormat', i, 'text') as string)
+			: 'text';
+		const jsonOptions =
+			outputFormat === 'json' ? (this.getNodeParameter('jsonOptions', i, {}) as IDataObject) : {};
+		const jsonExample = String(jsonOptions.example ?? '');
+		const requiredKeys = String(jsonOptions.requiredKeys ?? '')
+			.split(',')
+			.map((k) => k.trim())
+			.filter(Boolean);
+
+		let userMessage = message.trim();
+		if (outputFormat === 'json' && jsonOptions.addInstruction !== false) {
+			const instruction = jsonInstruction(jsonExample, requiredKeys);
+			userMessage = userMessage
+				? `${userMessage}
+
+${instruction}`
+				: instruction;
+		}
+		if (userMessage) messages.push({ role: 'user', content: userMessage });
 		if (messages.length) body.messages = messages;
 
 		if (options.model) body.model = options.model;
@@ -362,16 +400,17 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 		if (collections.length) body.memory_collections = collections;
 		body.waitExecution = wait;
 
-		const response = (await tessApiRequest.call(
-			this,
-			'POST',
-			`/agents/${agentId}/execute`,
-			body,
-		)) as IDataObject;
-		let execution = ((response.responses as IDataObject[] | undefined)?.[0] ??
-			response) as IDataObject;
+		const runOnce = async (requestBody: IDataObject): Promise<IDataObject> => {
+			const response = (await tessApiRequest.call(
+				this,
+				'POST',
+				`/agents/${agentId}/execute`,
+				requestBody,
+			)) as IDataObject;
+			let execution = ((response.responses as IDataObject[] | undefined)?.[0] ??
+				response) as IDataObject;
+			if (!wait) return execution;
 
-		if (wait) {
 			execution = await waitForAgentResponse.call(this, execution, i, {
 				timeoutSeconds: (options.timeout as number) ?? 600,
 				intervalSeconds: (options.pollInterval as number) ?? 3,
@@ -382,6 +421,48 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 					`Agent execution ${execution.id} ended with status "${execution.status}"`,
 					{ itemIndex: i, description: String(execution.output ?? '') },
 				);
+			}
+			return execution;
+		};
+
+		let execution = await runOnce(body);
+
+		if (outputFormat === 'json') {
+			const maxRetries = Math.max(0, Number(jsonOptions.retries ?? 1));
+			let credits = Number(execution.credits ?? 0);
+			for (let attempt = 0; ; attempt++) {
+				const check = extractJson(execution.output);
+				const missing = check.ok ? missingKeys(check.value, requiredKeys) : [];
+				if (check.ok && !missing.length) {
+					return {
+						...execution,
+						credits,
+						output_json: check.value as IDataObject,
+						json_attempts: attempt + 1,
+						agent_id: Number(agentId),
+					};
+				}
+				const problem = check.ok ? `missing keys: ${missing.join(', ')}` : String(check.error);
+				if (attempt >= maxRetries) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Agent did not return valid JSON after ${attempt + 1} attempt(s): ${problem}`,
+						{
+							itemIndex: i,
+							description: `Execution ${execution.id}. Output:
+${String(execution.output ?? '').slice(0, 2000)}`,
+						},
+					);
+				}
+				// pede a correcao na mesma conversa (root_id), mantendo os inputs do agente
+				execution = await runOnce({
+					...body,
+					root_id: execution.root_id ?? execution.id,
+					messages: [
+						{ role: 'user', content: correctionMessage(problem, jsonExample, requiredKeys) },
+					],
+				});
+				credits += Number(execution.credits ?? 0);
 			}
 		}
 

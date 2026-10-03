@@ -84,7 +84,8 @@ export async function waitForAgentResponse(
 	{ timeoutSeconds, intervalSeconds }: { timeoutSeconds: number; intervalSeconds: number },
 ): Promise<IDataObject> {
 	let current = response;
-	const deadline = Date.now() + timeoutSeconds * 1000;
+	// timeout 0 = sem limite (vale so o timeout de execucao do proprio n8n, se configurado)
+	const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : Infinity;
 
 	while (!TERMINAL_STATUSES.includes(String(current.status))) {
 		if (Date.now() >= deadline) {

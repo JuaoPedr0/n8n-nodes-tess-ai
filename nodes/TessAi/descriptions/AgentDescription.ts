@@ -120,6 +120,91 @@ export const agentFields: INodeProperties[] = [
 		displayOptions: showFor(['execute']),
 	},
 	{
+		displayName: 'Output Format',
+		name: 'outputFormat',
+		type: 'options',
+		options: [
+			{ name: 'Text', value: 'text', description: 'Return the agent answer as text in "output"' },
+			{
+				name: 'JSON',
+				value: 'json',
+				description:
+					'Ask for JSON, parse it into "output_json" and fail if the answer is not valid JSON',
+			},
+		],
+		default: 'text',
+		displayOptions: {
+			show: { resource: ['agent'], operation: ['execute'], waitForCompletion: [true] },
+		},
+	},
+	{
+		displayName:
+			'The Tess API has no native JSON mode: the node adds an instruction to the message, extracts the JSON from the answer (also inside ```json blocks), checks the required keys and, if needed, asks the agent to fix it in the same conversation. If it is still invalid, the node fails.',
+		name: 'jsonNotice',
+		type: 'notice',
+		default: '',
+		displayOptions: {
+			show: {
+				resource: ['agent'],
+				operation: ['execute'],
+				waitForCompletion: [true],
+				outputFormat: ['json'],
+			},
+		},
+	},
+	{
+		displayName: 'JSON Options',
+		name: 'jsonOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: {
+			show: {
+				resource: ['agent'],
+				operation: ['execute'],
+				waitForCompletion: [true],
+				outputFormat: ['json'],
+			},
+		},
+		options: [
+			{
+				displayName: 'Add JSON Instruction to Message',
+				name: 'addInstruction',
+				type: 'boolean',
+				default: true,
+				description:
+					'Whether to append "answer only with valid JSON" (plus the example and required keys) to the message. Disable if the agent prompt already does it.',
+			},
+			{
+				displayName: 'Expected Structure (Example)',
+				name: 'example',
+				type: 'json',
+				default: '',
+				placeholder: '{ "summary": "...", "risks": [{ "title": "...", "level": "high" }] }',
+				description:
+					'Example of the JSON the agent must return. Sent to the agent as a model to follow.',
+			},
+			{
+				displayName: 'Required Keys',
+				name: 'requiredKeys',
+				type: 'string',
+				default: '',
+				placeholder: 'summary, risks',
+				description:
+					'Comma-separated top-level keys that must exist (in the object, or in every item if it is an array). Missing keys count as invalid JSON.',
+			},
+			{
+				displayName: 'Correction Attempts',
+				name: 'retries',
+				type: 'number',
+				typeOptions: { minValue: 0, maxValue: 5 },
+				default: 1,
+				description:
+					'How many times to ask the agent to fix an invalid answer before failing. Each attempt is a new execution (consumes credits).',
+			},
+		],
+	},
+	{
 		displayName: 'Options',
 		name: 'options',
 		type: 'collection',
@@ -212,7 +297,8 @@ export const agentFields: INodeProperties[] = [
 					'Same as "Previous Messages", but as a JSON array — useful with an expression that returns the history from a previous node. Format: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}].',
 			},
 			{
-				displayName: 'Temperature Name or ID',
+				// eslint-disable-next-line n8n-nodes-base/node-param-display-name-wrong-for-dynamic-options
+				displayName: 'Temperature',
 				name: 'temperature',
 				type: 'options',
 				typeOptions: {
@@ -221,15 +307,16 @@ export const agentFields: INodeProperties[] = [
 				},
 				default: '',
 				description:
-					'Lower is more objective, higher is more creative. Values allowed by the selected agent; empty uses the agent default. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+					'Lower is more objective, higher is more creative. The list shows the values allowed by the selected agent (empty uses the agent default); with an expression any number can be sent, e.g. 0.3. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 			},
 			{
 				displayName: 'Timeout (Seconds)',
 				name: 'timeout',
 				type: 'number',
-				typeOptions: { minValue: 10 },
+				typeOptions: { minValue: 0 },
 				default: 600,
-				description: 'Maximum time to wait for the agent to finish',
+				description:
+					'Maximum time to wait for the agent to finish. 0 = no limit (only the n8n execution timeout applies, if configured).',
 			},
 			{
 				displayName: 'Tool Name or ID',
