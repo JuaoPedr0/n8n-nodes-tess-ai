@@ -26,7 +26,13 @@ import {
 	memoryFields,
 	memoryOperations,
 } from './descriptions/MemoryDescription';
-import { correctionMessage, extractJson, jsonInstruction, missingKeys } from './JsonOutput';
+import {
+	correctionMessage,
+	extractJson,
+	instructionMessages,
+	parseDto,
+	validateDto,
+} from './JsonOutput';
 import {
 	parseIdList,
 	tessApiRequest,
@@ -365,27 +371,25 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 			}
 			messages.push(...(parsed as IDataObject[]));
 		}
+		// Saída em JSON: o DTO é obrigatório e vai como instrução (mensagens anteriores à mensagem atual)
 		const outputFormat = wait
 			? (this.getNodeParameter('outputFormat', i, 'text') as string)
 			: 'text';
-		const jsonOptions =
-			outputFormat === 'json' ? (this.getNodeParameter('jsonOptions', i, {}) as IDataObject) : {};
-		const jsonExample = String(jsonOptions.example ?? '');
-		const requiredKeys = String(jsonOptions.requiredKeys ?? '')
-			.split(',')
-			.map((k) => k.trim())
-			.filter(Boolean);
-
-		let userMessage = message.trim();
-		if (outputFormat === 'json' && jsonOptions.addInstruction !== false) {
-			const instruction = jsonInstruction(jsonExample, requiredKeys);
-			userMessage = userMessage
-				? `${userMessage}
-
-${instruction}`
-				: instruction;
+		let dto: unknown;
+		if (outputFormat === 'json') {
+			try {
+				dto = parseDto(this.getNodeParameter('responseDto', i, ''));
+			} catch (error) {
+				throw new NodeOperationError(
+					this.getNode(),
+					`Invalid "Response DTO": ${(error as Error).message}`,
+					{ itemIndex: i },
+				);
+			}
+			messages.push(...instructionMessages(dto));
 		}
-		if (userMessage) messages.push({ role: 'user', content: userMessage });
+
+		if (message.trim()) messages.push({ role: 'user', content: message });
 		if (messages.length) body.messages = messages;
 
 		if (options.model) body.model = options.model;
@@ -428,39 +432,43 @@ ${instruction}`
 		let execution = await runOnce(body);
 
 		if (outputFormat === 'json') {
-			const maxRetries = Math.max(0, Number(jsonOptions.retries ?? 1));
+			const maxRetries = Math.max(0, Number(this.getNodeParameter('jsonRetries', i, 1)));
 			let credits = Number(execution.credits ?? 0);
 			for (let attempt = 0; ; attempt++) {
-				const check = extractJson(execution.output);
-				const missing = check.ok ? missingKeys(check.value, requiredKeys) : [];
-				if (check.ok && !missing.length) {
+				const extracted = extractJson(execution.output);
+				const checked = extracted.ok ? validateDto(extracted.value, dto) : undefined;
+				const problems = extracted.ok ? checked!.errors : [String(extracted.error)];
+
+				if (!problems.length) {
 					return {
 						...execution,
 						credits,
-						output_json: check.value as IDataObject,
+						output_json: checked!.value as IDataObject,
 						json_attempts: attempt + 1,
+						json_fixes: checked!.fixes,
 						agent_id: Number(agentId),
 					};
 				}
-				const problem = check.ok ? `missing keys: ${missing.join(', ')}` : String(check.error);
 				if (attempt >= maxRetries) {
 					throw new NodeOperationError(
 						this.getNode(),
-						`Agent did not return valid JSON after ${attempt + 1} attempt(s): ${problem}`,
+						`Agent did not return JSON matching the Response DTO after ${attempt + 1} attempt(s)`,
 						{
 							itemIndex: i,
-							description: `Execution ${execution.id}. Output:
-${String(execution.output ?? '').slice(0, 2000)}`,
+							description: [
+								...problems.slice(0, 20).map((p) => `• ${p}`),
+								'',
+								`Execution ${execution.id} output:`,
+								String(execution.output ?? '').slice(0, 2000),
+							].join('\n'),
 						},
 					);
 				}
-				// pede a correcao na mesma conversa (root_id), mantendo os inputs do agente
+				// pede a correção na mesma conversa (root_id), mantendo os inputs do agente
 				execution = await runOnce({
 					...body,
 					root_id: execution.root_id ?? execution.id,
-					messages: [
-						{ role: 'user', content: correctionMessage(problem, jsonExample, requiredKeys) },
-					],
+					messages: [{ role: 'user', content: correctionMessage(problems, dto) }],
 				});
 				credits += Number(execution.credits ?? 0);
 			}

@@ -139,7 +139,7 @@ export const agentFields: INodeProperties[] = [
 	},
 	{
 		displayName:
-			'The Tess API has no native JSON mode: the node adds an instruction to the message, extracts the JSON from the answer (also inside ```json blocks), checks the required keys and, if needed, asks the agent to fix it in the same conversation. If it is still invalid, the node fails.',
+			'The DTO is sent to the agent as a format instruction before the message. The answer must have exactly its keys and types: extra or missing keys are sent back to the agent for correction; "true"/"false" and numbers in quotes are converted here. If it is still invalid after the correction attempts, the node fails.',
 		name: 'jsonNotice',
 		type: 'notice',
 		default: '',
@@ -153,11 +153,15 @@ export const agentFields: INodeProperties[] = [
 		},
 	},
 	{
-		displayName: 'JSON Options',
-		name: 'jsonOptions',
-		type: 'collection',
-		placeholder: 'Add Option',
-		default: {},
+		displayName: 'Response DTO',
+		name: 'responseDto',
+		type: 'json',
+		required: true,
+		default: '',
+		placeholder:
+			'{ "approved": true, "score": 0, "summary": "text", "risks": [{ "title": "text", "level": "high" }] }',
+		description:
+			'Exact JSON structure the agent must return. Values define the types (true = boolean, 0 = number, "text" = string; "boolean", "number" and "string" also work). An array with one item defines the format of all items. null = any type.',
 		displayOptions: {
 			show: {
 				resource: ['agent'],
@@ -166,43 +170,23 @@ export const agentFields: INodeProperties[] = [
 				outputFormat: ['json'],
 			},
 		},
-		options: [
-			{
-				displayName: 'Add JSON Instruction to Message',
-				name: 'addInstruction',
-				type: 'boolean',
-				default: true,
-				description:
-					'Whether to append "answer only with valid JSON" (plus the example and required keys) to the message. Disable if the agent prompt already does it.',
+	},
+	{
+		displayName: 'Correction Attempts',
+		name: 'jsonRetries',
+		type: 'number',
+		typeOptions: { minValue: 0, maxValue: 5 },
+		default: 1,
+		description:
+			'How many times to ask the agent to fix an answer that does not match the DTO before failing. Each attempt is a new execution in the same conversation (consumes credits).',
+		displayOptions: {
+			show: {
+				resource: ['agent'],
+				operation: ['execute'],
+				waitForCompletion: [true],
+				outputFormat: ['json'],
 			},
-			{
-				displayName: 'Expected Structure (Example)',
-				name: 'example',
-				type: 'json',
-				default: '',
-				placeholder: '{ "summary": "...", "risks": [{ "title": "...", "level": "high" }] }',
-				description:
-					'Example of the JSON the agent must return. Sent to the agent as a model to follow.',
-			},
-			{
-				displayName: 'Required Keys',
-				name: 'requiredKeys',
-				type: 'string',
-				default: '',
-				placeholder: 'summary, risks',
-				description:
-					'Comma-separated top-level keys that must exist (in the object, or in every item if it is an array). Missing keys count as invalid JSON.',
-			},
-			{
-				displayName: 'Correction Attempts',
-				name: 'retries',
-				type: 'number',
-				typeOptions: { minValue: 0, maxValue: 5 },
-				default: 1,
-				description:
-					'How many times to ask the agent to fix an invalid answer before failing. Each attempt is a new execution (consumes credits).',
-			},
-		],
+		},
 	},
 	{
 		displayName: 'Options',

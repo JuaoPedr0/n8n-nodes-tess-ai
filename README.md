@@ -41,15 +41,23 @@ O botão **Test** lista um agente para validar token e workspace.
   `/agent-responses/{id}` a cada *Poll Interval* até terminar ou atingir o *Timeout* (padrão 600 s;
   **0 = sem limite**, vale só o timeout de execução do n8n, se houver).
   Desligado, devolve o ID da execução na hora — consulte depois com *Agent Response → Get*.
-- **Output Format → JSON**: a API da Tess não tem "modo JSON", então o node:
-  1. acrescenta à mensagem a instrução "responda só com JSON válido" (+ o *Expected Structure* e as *Required Keys*);
-  2. extrai o JSON da resposta — aceita blocos ` ```json `, texto antes/depois, objeto ou array;
-  3. confere as *Required Keys* (no objeto ou em cada item do array);
-  4. se inválido, pede a correção **na mesma conversa** (`root_id`) até *Correction Attempts* vezes;
-  5. ainda inválido → **o node falha** (ou devolve `error` com *Continue On Fail*).
+- **Output Format → JSON** (a API da Tess não tem "modo JSON"; o node garante o formato):
+  - **Response DTO** (obrigatório): a estrutura exata da resposta. Os valores definem os tipos —
+    `true` = boolean, `0` = número, `"texto"` = string (ou escreva `"boolean"`, `"number"`, `"string"`);
+    `null` = qualquer tipo; um array com 1 item define o formato de todos os itens. Ex.:
+    `{ "aprovado": true, "nota": 0, "resumo": "texto", "riscos": [{ "titulo": "texto", "nivel": "alto" }] }`
+  - O DTO vai ao agente como **mensagens anteriores** (instrução do usuário + confirmação do assistente) e
+    *Message* vem por último.
+  - Na resposta, o node extrai o JSON (aceita ` ```json `, texto antes/depois) e valida contra o DTO:
+    - `"true"`/`"false"` → boolean, `"8"` → número, número/boolean → texto: **corrigido no node**, sem reenviar
+      (lista em `json_fixes`);
+    - **campo não solicitado**, campo faltando ou tipo impossível de converter → pede a correção **na mesma
+      conversa** (`root_id`) até *Correction Attempts* vezes;
+    - ainda inválido → **o node falha** listando os problemas (ou devolve `error` com *Continue On Fail*).
+  - `null` é aceito em qualquer campo.
 
-  Saída: `output_json` (o JSON já convertido), `output` (texto original), `json_attempts` e `credits` somados de
-  todas as tentativas.
+  Saída: `output_json` (JSON validado e convertido), `output` (texto original), `json_attempts`, `json_fixes` e
+  `credits` somados de todas as tentativas.
 - **Options**:
   - **Model**, **Tool** e **Temperature**: listas com os valores que o agente escolhido permite (vazio = padrão do
     agente). Só uma ferramenta por execução.
