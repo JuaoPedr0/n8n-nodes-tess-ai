@@ -2,7 +2,7 @@
 	"node": "@conasa/n8n-nodes-tess-ai.tessAi",
 	"nodeVersion": "1.0",
 	"codexVersion": "1.0",
-	"categories": ["AI", "Productivity"],
+	"categories": ["Productivity", "Development"],
 	"resources": {
 		"credentialDocumentation": [
 			{
