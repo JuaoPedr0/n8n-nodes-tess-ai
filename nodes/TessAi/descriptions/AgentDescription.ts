@@ -128,20 +128,12 @@ export const agentFields: INodeProperties[] = [
 		displayOptions: showFor(['execute']),
 		options: [
 			{
-				displayName: 'Chat History (JSON)',
-				name: 'messages',
-				type: 'json',
-				default: '[]',
-				description:
-					'Full message list in OpenAI format, e.g. [{"role":"user","content":"Hi"}]. Overrides "Message".',
-			},
-			{
 				displayName: 'Continue Conversation (Root ID)',
 				name: 'rootId',
 				type: 'number',
 				default: 0,
 				description:
-					'ID of a previous execution (root_id) to continue the same conversation thread',
+					'Continues a conversation stored by Tess: use the "root_id" returned by a previous execution. Tess already keeps the history, so you do not need "Previous Messages".',
 			},
 			{
 				displayName: 'File IDs',
@@ -160,12 +152,13 @@ export const agentFields: INodeProperties[] = [
 				description: 'Comma-separated memory collection IDs used as context',
 			},
 			{
-				displayName: 'Model',
+				displayName: 'Model Name or ID',
 				name: 'model',
-				type: 'string',
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getAgentModels', loadOptionsDependsOn: ['agent.value'] },
 				default: '',
-				placeholder: 'tess-5',
-				description: 'Model identifier. Leave empty to use the agent default.',
+				description:
+					'Models allowed by the selected agent. Empty uses the agent default. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 			},
 			{
 				displayName: 'Poll Interval (Seconds)',
@@ -176,13 +169,59 @@ export const agentFields: INodeProperties[] = [
 				description: 'How often to check the execution status while waiting',
 			},
 			{
-				displayName: 'Temperature',
-				name: 'temperature',
-				type: 'number',
-				typeOptions: { minValue: 0, maxValue: 2, numberPrecision: 2 },
-				default: 1,
+				displayName: 'Previous Messages',
+				name: 'history',
+				type: 'fixedCollection',
+				typeOptions: { multipleValues: true, sortable: true },
+				placeholder: 'Add Message',
+				default: {},
 				description:
-					'Sampling temperature between 0 and 2. Higher values produce more creative outputs.',
+					'Earlier turns of a conversation that Tess does not know yet (e.g. a chat kept in another system). They are sent before "Message".',
+				options: [
+					{
+						displayName: 'Message',
+						name: 'messages',
+						values: [
+							{
+								displayName: 'Role',
+								name: 'role',
+								type: 'options',
+								options: [
+									{ name: 'User', value: 'user' },
+									{ name: 'Assistant', value: 'assistant' },
+								],
+								default: 'user',
+							},
+							{
+								displayName: 'Content',
+								name: 'content',
+								type: 'string',
+								typeOptions: { rows: 2 },
+								default: '',
+							},
+						],
+					},
+				],
+			},
+			{
+				displayName: 'Previous Messages (JSON)',
+				name: 'messages',
+				type: 'json',
+				default: '[]',
+				description:
+					'Same as "Previous Messages", but as a JSON array — useful with an expression that returns the history from a previous node. Format: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}].',
+			},
+			{
+				displayName: 'Temperature Name or ID',
+				name: 'temperature',
+				type: 'options',
+				typeOptions: {
+					loadOptionsMethod: 'getAgentTemperatures',
+					loadOptionsDependsOn: ['agent.value'],
+				},
+				default: '',
+				description:
+					'Lower is more objective, higher is more creative. Values allowed by the selected agent; empty uses the agent default. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 			},
 			{
 				displayName: 'Timeout (Seconds)',
@@ -193,13 +232,13 @@ export const agentFields: INodeProperties[] = [
 				description: 'Maximum time to wait for the agent to finish',
 			},
 			{
-				displayName: 'Tools',
+				displayName: 'Tool Name or ID',
 				name: 'tools',
-				type: 'string',
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getAgentTools', loadOptionsDependsOn: ['agent.value'] },
 				default: '',
-				placeholder: 'no-tools',
 				description:
-					'Tools the agent may use (e.g. no-tools, internet, agent). Leave empty for the agent default.',
+					'Tool the agent may use in this execution (one per execution). Empty uses the agent default. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 			},
 		],
 	},

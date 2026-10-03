@@ -33,13 +33,22 @@ O botão **Test** lista um agente para validar token e workspace.
 
 - **Agent**: escolha da lista (busca por nome), por ID ou pela URL do agente.
 - **Message**: mensagem do usuário (agentes de chat). Vira `messages: [{ role: "user", content }]`.
-- **Agent Inputs**: os campos que o agente define (ex.: "nome-da-empresa", "language") são carregados
-  automaticamente depois de escolher o agente.
+- **Agent Inputs**: os campos que o agente define (ex.: "nome-da-empresa", "max_mode") são carregados
+  automaticamente depois de escolher o agente, já com o tipo certo (texto, número, sim/não, lista).
+  `model`, `tools` e `temperature` ficam em *Options* como listas; `stream` não aparece (o node sempre espera a
+  resposta completa).
 - **Wait for Completion** (padrão: ligado): a Tess responde em até 100 s; se a execução continuar, o node consulta
   `/agent-responses/{id}` a cada *Poll Interval* até terminar ou atingir o *Timeout* (padrão 600 s).
   Desligado, devolve o ID da execução na hora — consulte depois com *Agent Response → Get*.
-- **Options**: Chat History (JSON no formato OpenAI), Continue Conversation (`root_id` de uma execução anterior),
-  File IDs, Memory Collection IDs, Model, Temperature, Tools.
+- **Options**:
+  - **Model**, **Tool** e **Temperature**: listas com os valores que o agente escolhido permite (vazio = padrão do
+    agente). Só uma ferramenta por execução.
+  - **Continue Conversation (Root ID)**: continua uma conversa que a Tess já guardou — use o `root_id` devolvido
+    por uma execução anterior. É o jeito mais simples de manter contexto.
+  - **Previous Messages** / **Previous Messages (JSON)**: só quando o histórico está fora da Tess (ex.: um chat
+    guardado em outro sistema). As mensagens vão antes de *Message*. A versão JSON aceita uma expressão que
+    devolve a lista `[{ "role": "user"|"assistant", "content": "..." }]`.
+  - File IDs, Memory Collection IDs, Poll Interval, Timeout.
 
 Saída: o objeto da execução (`id`, `status`, `output`, `credits`, `root_id`, `generated_files`…) + `agent_id`.
 Execução com status diferente de `succeeded` gera erro (use *Continue On Fail* para tratar no fluxo).

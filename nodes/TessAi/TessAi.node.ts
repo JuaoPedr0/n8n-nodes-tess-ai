@@ -33,7 +33,8 @@ import {
 	waitForAgentResponse,
 } from './GenericFunctions';
 
-// campos do agente que o node expõe em "Options" (não aparecem em "Agent Inputs")
+// campos do agente que o node expõe em "Options" ou controla sozinho (não aparecem em "Agent Inputs").
+// "stream" fica de fora: o node sempre espera a resposta completa.
 const RESERVED_INPUTS = [
 	'messages',
 	'root_id',
@@ -43,7 +44,11 @@ const RESERVED_INPUTS = [
 	'file_ids',
 	'memory_collections',
 	'waitExecution',
+	'stream',
 ];
+
+// quando o agente não define temperaturas permitidas
+const DEFAULT_TEMPERATURES = ['0', '0.25', '0.5', '0.75', '1'];
 
 interface AgentQuestion {
 	name: string;
@@ -51,6 +56,37 @@ interface AgentQuestion {
 	description?: string | null;
 	required?: boolean;
 	options?: string[];
+	default?: unknown;
+}
+
+async function getAgentQuestions(this: ILoadOptionsFunctions): Promise<AgentQuestion[]> {
+	const agentId = this.getNodeParameter('agent', undefined, { extractValue: true }) as string;
+	if (!agentId || !/^[0-9]+$/.test(String(agentId))) return [];
+	const agent = (await tessApiRequest.call(this, 'GET', `/agents/${agentId}`)) as IDataObject;
+	return ((agent.questions as AgentQuestion[] | undefined) ?? []).filter((q) => q?.name);
+}
+
+/** Opções de um campo "select" do agente (model, tools, temperature) + "padrão do agente". */
+async function agentSelectOptions(
+	this: ILoadOptionsFunctions,
+	questionName: string,
+	fallback: string[] = [],
+): Promise<INodePropertyOptions[]> {
+	const question = (await getAgentQuestions.call(this)).find((q) => q.name === questionName);
+	const values = question?.options?.length ? question.options : fallback;
+	return [
+		{ name: 'Agent Default', value: '' },
+		...values.map((v) => ({ name: String(v), value: String(v) })),
+	];
+}
+
+function fieldTypeOf(q: AgentQuestion): FieldType {
+	if (q.type === 'select' && q.options?.length) return 'options';
+	if (q.type === 'number') return 'number';
+	if (q.type === 'boolean') return 'boolean';
+	if (q.type === 'array') return 'array';
+	if (q.type === 'object') return 'object';
+	return 'string';
 }
 
 export class TessAi implements INodeType {
@@ -132,23 +168,28 @@ export class TessAi implements INodeType {
 					value: c.id as number,
 				}));
 			},
+
+			async getAgentModels(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+				return await agentSelectOptions.call(this, 'model');
+			},
+
+			async getAgentTools(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+				return await agentSelectOptions.call(this, 'tools');
+			},
+
+			async getAgentTemperatures(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+				return await agentSelectOptions.call(this, 'temperature', DEFAULT_TEMPERATURES);
+			},
 		},
 
 		resourceMapping: {
 			async getAgentInputs(this: ILoadOptionsFunctions): Promise<ResourceMapperFields> {
-				const agentId = this.getNodeParameter('agent', undefined, { extractValue: true }) as string;
-				if (!agentId) return { fields: [] };
-
-				const agent = (await tessApiRequest.call(this, 'GET', `/agents/${agentId}`)) as IDataObject;
-				const questions = ((agent.questions as AgentQuestion[] | undefined) ?? []).filter(
-					(q) => q?.name && !RESERVED_INPUTS.includes(q.name),
+				const questions = (await getAgentQuestions.call(this)).filter(
+					(q) => !RESERVED_INPUTS.includes(q.name),
 				);
 
 				const fields: ResourceMapperField[] = questions.map((q) => {
-					const hasOptions =
-						q.type === 'select' && Array.isArray(q.options) && q.options.length > 0;
-					const type: FieldType =
-						q.type === 'number' ? 'number' : hasOptions ? 'options' : 'string';
+					const type = fieldTypeOf(q);
 					return {
 						id: q.name,
 						displayName: q.description ? `${q.name} (${q.description})` : q.name,
@@ -157,7 +198,7 @@ export class TessAi implements INodeType {
 						canBeUsedToMatch: false,
 						display: true,
 						type,
-						...(hasOptions
+						...(type === 'options'
 							? { options: q.options!.map((o) => ({ name: String(o), value: String(o) })) }
 							: {}),
 					};
@@ -285,25 +326,34 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 			if (value !== null && value !== undefined && value !== '') body[key] = value;
 		}
 
-		let messages: IDataObject[] = [];
+		// histórico (lista ou JSON) + mensagem atual
+		const messages: IDataObject[] = [];
+		const history = ((options.history as IDataObject | undefined)?.messages as IDataObject[]) ?? [];
+		for (const m of history) {
+			if (String(m.content ?? '').trim())
+				messages.push({ role: m.role ?? 'user', content: m.content });
+		}
 		if (options.messages !== undefined && options.messages !== '' && options.messages !== '[]') {
 			const parsed =
 				typeof options.messages === 'string'
 					? jsonParse<unknown>(options.messages)
 					: options.messages;
 			if (!Array.isArray(parsed)) {
-				throw new NodeOperationError(this.getNode(), '"Chat History (JSON)" must be a JSON array', {
-					itemIndex: i,
-				});
+				throw new NodeOperationError(
+					this.getNode(),
+					'"Previous Messages (JSON)" must be a JSON array',
+					{ itemIndex: i },
+				);
 			}
-			messages = parsed as IDataObject[];
-		} else if (message.trim()) {
-			messages = [{ role: 'user', content: message }];
+			messages.push(...(parsed as IDataObject[]));
 		}
+		if (message.trim()) messages.push({ role: 'user', content: message });
 		if (messages.length) body.messages = messages;
 
 		if (options.model) body.model = options.model;
-		if (options.temperature !== undefined) body.temperature = String(options.temperature);
+		if (options.temperature !== undefined && options.temperature !== '') {
+			body.temperature = String(options.temperature);
+		}
 		if (options.tools) body.tools = options.tools;
 		if (options.rootId) body.root_id = options.rootId;
 		const fileIds = parseIdList(options.fileIds);
