@@ -118,7 +118,10 @@ export class TessAi implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Tess AI',
 		name: 'tessAi',
-		icon: { light: 'file:../../icons/tessAi.svg', dark: 'file:../../icons/tessAi.dark.svg' },
+		icon: {
+			light: 'file:../../icons/tess-ai-logo.svg',
+			dark: 'file:../../icons/tess-ai-logo.dark.svg',
+		},
 		group: ['transform'],
 		version: [1],
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',

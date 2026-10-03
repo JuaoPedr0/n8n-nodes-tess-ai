@@ -11,7 +11,10 @@ export class TessAiApi implements ICredentialType {
 
 	displayName = 'Tess AI API';
 
-	icon: Icon = { light: 'file:../icons/tessAi.svg', dark: 'file:../icons/tessAi.dark.svg' };
+	icon: Icon = {
+		light: 'file:../icons/tess-ai-logo.svg',
+		dark: 'file:../icons/tess-ai-logo.dark.svg',
+	};
 
 	documentationUrl = 'https://docs.tess.im/en/api-overview';
 
