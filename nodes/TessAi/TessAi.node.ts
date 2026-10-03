@@ -27,12 +27,13 @@ import {
 	memoryOperations,
 } from './descriptions/MemoryDescription';
 import {
+	buildSchema,
 	correctionMessage,
 	extractJson,
 	instructionMessages,
-	parseDto,
-	validateDto,
+	validateSchema,
 } from './JsonOutput';
+import type { JsonSchema } from './JsonOutput';
 import {
 	parseIdList,
 	tessApiRequest,
@@ -375,18 +376,21 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 		const outputFormat = wait
 			? (this.getNodeParameter('outputFormat', i, 'text') as string)
 			: 'text';
-		let dto: unknown;
+		let schema: JsonSchema = {};
 		if (outputFormat === 'json') {
 			try {
-				dto = parseDto(this.getNodeParameter('responseDto', i, ''));
-			} catch (error) {
-				throw new NodeOperationError(
-					this.getNode(),
-					`Invalid "Response DTO": ${(error as Error).message}`,
-					{ itemIndex: i },
+				// lê só o campo visível do modo escolhido
+				const schemaType = this.getNodeParameter('schemaType', i, 'fromJson') as string;
+				const built = buildSchema(
+					schemaType,
+					schemaType === 'fromJson' ? this.getNodeParameter('jsonSchemaExample', i, '') : undefined,
+					schemaType === 'manual' ? this.getNodeParameter('inputSchema', i, '') : undefined,
 				);
+				schema = built.schema;
+				messages.push(...instructionMessages(schema, built.example));
+			} catch (error) {
+				throw new NodeOperationError(this.getNode(), (error as Error).message, { itemIndex: i });
 			}
-			messages.push(...instructionMessages(dto));
 		}
 
 		if (message.trim()) messages.push({ role: 'user', content: message });
@@ -436,7 +440,7 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 			let credits = Number(execution.credits ?? 0);
 			for (let attempt = 0; ; attempt++) {
 				const extracted = extractJson(execution.output);
-				const checked = extracted.ok ? validateDto(extracted.value, dto) : undefined;
+				const checked = extracted.ok ? validateSchema(extracted.value, schema) : undefined;
 				const problems = extracted.ok ? checked!.errors : [String(extracted.error)];
 
 				if (!problems.length) {
@@ -452,7 +456,7 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 				if (attempt >= maxRetries) {
 					throw new NodeOperationError(
 						this.getNode(),
-						`Agent did not return JSON matching the Response DTO after ${attempt + 1} attempt(s)`,
+						`Agent did not return JSON valid against the schema after ${attempt + 1} attempt(s)`,
 						{
 							itemIndex: i,
 							description: [
@@ -468,7 +472,7 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 				execution = await runOnce({
 					...body,
 					root_id: execution.root_id ?? execution.id,
-					messages: [{ role: 'user', content: correctionMessage(problems, dto) }],
+					messages: [{ role: 'user', content: correctionMessage(problems, schema) }],
 				});
 				credits += Number(execution.credits ?? 0);
 			}

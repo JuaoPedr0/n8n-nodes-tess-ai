@@ -138,11 +138,26 @@ export const agentFields: INodeProperties[] = [
 		},
 	},
 	{
-		displayName:
-			'The DTO is sent to the agent as a format instruction before the message. The answer must have exactly its keys and types: extra or missing keys are sent back to the agent for correction; "true"/"false" and numbers in quotes are converted here. If it is still invalid after the correction attempts, the node fails.',
-		name: 'jsonNotice',
-		type: 'notice',
-		default: '',
+		displayName: 'Schema Type',
+		name: 'schemaType',
+		type: 'options',
+		noDataExpression: true,
+		options: [
+			{
+				name: 'Generate From JSON Example',
+				value: 'fromJson',
+				description:
+					'Generate a schema from an example JSON object (all keys required, no extra keys)',
+			},
+			{
+				name: 'Define Using JSON Schema',
+				value: 'manual',
+				description:
+					'Define the JSON Schema manually (JSON Schema standard, draft 2020-12 keywords)',
+			},
+		],
+		default: 'fromJson',
+		description: 'How to specify the schema of the agent answer',
 		displayOptions: {
 			show: {
 				resource: ['agent'],
@@ -153,15 +168,51 @@ export const agentFields: INodeProperties[] = [
 		},
 	},
 	{
-		displayName: 'Response DTO',
-		name: 'responseDto',
+		displayName: 'JSON Example',
+		name: 'jsonSchemaExample',
 		type: 'json',
+		typeOptions: { rows: 10 },
+		default:
+			'{\n\t"state": "California",\n\t"cities": ["Los Angeles", "San Francisco", "San Diego"]\n}',
 		required: true,
-		default: '',
-		placeholder:
-			'{ "approved": true, "score": 0, "summary": "text", "risks": [{ "title": "text", "level": "high" }] }',
 		description:
-			'Exact JSON structure the agent must return. Values define the types (true = boolean, 0 = number, "text" = string; "boolean", "number" and "string" also work). An array with one item defines the format of all items. null = any type.',
+			'Example JSON object to use to generate the schema. Every key becomes required, extra keys are not allowed and values define the types ("boolean", "number", "integer" and "string" also work as type names; null = any type).',
+		displayOptions: {
+			show: {
+				resource: ['agent'],
+				operation: ['execute'],
+				waitForCompletion: [true],
+				outputFormat: ['json'],
+				schemaType: ['fromJson'],
+			},
+		},
+	},
+	{
+		displayName: 'Input Schema',
+		name: 'inputSchema',
+		type: 'json',
+		typeOptions: { rows: 10 },
+		default:
+			'{\n\t"type": "object",\n\t"properties": {\n\t\t"state": {\n\t\t\t"type": "string"\n\t\t},\n\t\t"cities": {\n\t\t\t"type": "array",\n\t\t\t"items": {\n\t\t\t\t"type": "string"\n\t\t\t}\n\t\t}\n\t},\n\t"required": ["state", "cities"]\n}',
+		required: true,
+		description:
+			'JSON Schema the answer must validate against. Properties not declared are rejected unless the schema sets "additionalProperties": true.',
+		displayOptions: {
+			show: {
+				resource: ['agent'],
+				operation: ['execute'],
+				waitForCompletion: [true],
+				outputFormat: ['json'],
+				schemaType: ['manual'],
+			},
+		},
+	},
+	{
+		displayName:
+			'The schema is sent to the agent as a format instruction before the message. The answer is validated against it: "true"/"false", numbers in quotes and numbers where text is expected are converted here; extra or missing properties and other violations are sent back to the agent for correction. If it is still invalid after the correction attempts, the node fails.',
+		name: 'jsonNotice',
+		type: 'notice',
+		default: '',
 		displayOptions: {
 			show: {
 				resource: ['agent'],

@@ -42,19 +42,24 @@ O botão **Test** lista um agente para validar token e workspace.
   **0 = sem limite**, vale só o timeout de execução do n8n, se houver).
   Desligado, devolve o ID da execução na hora — consulte depois com *Agent Response → Get*.
 - **Output Format → JSON** (a API da Tess não tem "modo JSON"; o node garante o formato):
-  - **Response DTO** (obrigatório): a estrutura exata da resposta. Os valores definem os tipos —
-    `true` = boolean, `0` = número, `"texto"` = string (ou escreva `"boolean"`, `"number"`, `"string"`);
-    `null` = qualquer tipo; um array com 1 item define o formato de todos os itens. Ex.:
-    `{ "aprovado": true, "nota": 0, "resumo": "texto", "riscos": [{ "titulo": "texto", "nivel": "alto" }] }`
-  - O DTO vai ao agente como **mensagens anteriores** (instrução do usuário + confirmação do assistente) e
-    *Message* vem por último.
-  - Na resposta, o node extrai o JSON (aceita ` ```json `, texto antes/depois) e valida contra o DTO:
-    - `"true"`/`"false"` → boolean, `"8"` → número, número/boolean → texto: **corrigido no node**, sem reenviar
-      (lista em `json_fixes`);
-    - **campo não solicitado**, campo faltando ou tipo impossível de converter → pede a correção **na mesma
-      conversa** (`root_id`) até *Correction Attempts* vezes;
-    - ainda inválido → **o node falha** listando os problemas (ou devolve `error` com *Continue On Fail*).
-  - `null` é aceito em qualquer campo.
+  - **Schema Type** — igual ao *Structured Output Parser* do n8n:
+    - **Generate From JSON Example** (*JSON Example*): gera o schema a partir de um exemplo — todas as chaves
+      obrigatórias, nenhuma a mais, tipos pelos valores (`true` = boolean, `0` = número, `"texto"` = string; também
+      aceita `"boolean"`, `"number"`, `"integer"`, `"string"` como nome do tipo; `null` = qualquer tipo).
+    - **Define Using JSON Schema** (*Input Schema*): [JSON Schema](https://json-schema.org) completo. Suporta
+      `type` (inclusive `["string","null"]`), `properties`, `required`, `additionalProperties`, `items` (lista e
+      tupla), `enum`, `const`, `anyOf`/`oneOf`/`allOf`, `$ref` local (`$defs`/`definitions`), `nullable`,
+      `minLength`/`maxLength`, `pattern`, `format` (date, date-time, time, email, uri, uuid),
+      `minimum`/`maximum`/`exclusive*`, `multipleOf`, `minItems`/`maxItems`.
+      **Propriedade não declarada é rejeitada**, a menos que o schema diga `"additionalProperties": true`.
+  - O schema (e o exemplo, no modo exemplo) vai ao agente como **mensagens anteriores** (instrução do usuário +
+    confirmação do assistente) e *Message* vem por último.
+  - Na resposta, o node extrai o JSON (aceita ` ```json `, texto antes/depois) e valida contra o schema:
+    - `"true"`/`"false"` → boolean, `"8"` → número/inteiro, número/boolean → texto, `"null"` → null (onde
+      permitido), valor de `enum` com tipo trocado → **corrigido no node**, sem reenviar (lista em `json_fixes`);
+    - **propriedade não solicitada**, obrigatória faltando, fora do `enum`/limites/formato ou tipo impossível de
+      converter → pede a correção **na mesma conversa** (`root_id`) até *Correction Attempts* vezes;
+    - ainda inválido → **o node falha** listando cada problema com o caminho (ex.: `$.riscos[0].peso is missing`).
 
   Saída: `output_json` (JSON validado e convertido), `output` (texto original), `json_attempts`, `json_fixes` e
   `credits` somados de todas as tentativas.
