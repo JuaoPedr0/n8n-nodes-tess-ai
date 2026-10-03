@@ -1,6 +1,6 @@
 {
 	"name": "@conasa/n8n-nodes-tess-ai",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"description": "Nodes para a API da Tess AI: agentes, execucoes, arquivos e memorias",
 	"license": "MIT",
 	"homepage": "https://github.com/JuaoPedr0/n8n-nodes-tess-ai#readme",
