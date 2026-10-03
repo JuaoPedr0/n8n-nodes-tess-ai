@@ -1,0 +1,405 @@
+import type {
+	FieldType,
+	IDataObject,
+	IExecuteFunctions,
+	ILoadOptionsFunctions,
+	INodeExecutionData,
+	INodeListSearchResult,
+	INodePropertyOptions,
+	INodeType,
+	INodeTypeDescription,
+	JsonObject,
+	ResourceMapperField,
+	ResourceMapperFields,
+} from 'n8n-workflow';
+import { jsonParse, NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+
+import { agentFields, agentOperations } from './descriptions/AgentDescription';
+import {
+	agentResponseFields,
+	agentResponseOperations,
+} from './descriptions/AgentResponseDescription';
+import { fileFields, fileOperations } from './descriptions/FileDescription';
+import {
+	memoryCollectionFields,
+	memoryCollectionOperations,
+	memoryFields,
+	memoryOperations,
+} from './descriptions/MemoryDescription';
+import {
+	parseIdList,
+	tessApiRequest,
+	tessApiRequestAllItems,
+	waitForAgentResponse,
+} from './GenericFunctions';
+
+// campos do agente que o node expõe em "Options" (não aparecem em "Agent Inputs")
+const RESERVED_INPUTS = [
+	'messages',
+	'root_id',
+	'temperature',
+	'model',
+	'tools',
+	'file_ids',
+	'memory_collections',
+	'waitExecution',
+];
+
+interface AgentQuestion {
+	name: string;
+	type?: string;
+	description?: string | null;
+	required?: boolean;
+	options?: string[];
+}
+
+export class TessAi implements INodeType {
+	description: INodeTypeDescription = {
+		displayName: 'Tess AI',
+		name: 'tessAi',
+		icon: { light: 'file:../../icons/tessAi.svg', dark: 'file:../../icons/tessAi.dark.svg' },
+		group: ['transform'],
+		version: [1],
+		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
+		description: 'Run Tess AI agents and manage files and memories',
+		defaults: { name: 'Tess AI' },
+		inputs: [NodeConnectionTypes.Main],
+		outputs: [NodeConnectionTypes.Main],
+		usableAsTool: true,
+		credentials: [{ name: 'tessAiApi', required: true }],
+		properties: [
+			{
+				displayName: 'Resource',
+				name: 'resource',
+				type: 'options',
+				noDataExpression: true,
+				options: [
+					{ name: 'Agent', value: 'agent' },
+					{ name: 'Agent Response', value: 'agentResponse' },
+					{ name: 'File', value: 'file' },
+					{ name: 'Memory', value: 'memory' },
+					{ name: 'Memory Collection', value: 'memoryCollection' },
+				],
+				default: 'agent',
+			},
+			...agentOperations,
+			...agentFields,
+			...agentResponseOperations,
+			...agentResponseFields,
+			...fileOperations,
+			...fileFields,
+			...memoryOperations,
+			...memoryFields,
+			...memoryCollectionOperations,
+			...memoryCollectionFields,
+		],
+	};
+
+	methods = {
+		listSearch: {
+			async searchAgents(
+				this: ILoadOptionsFunctions,
+				filter?: string,
+				paginationToken?: string,
+			): Promise<INodeListSearchResult> {
+				const page = Number(paginationToken) || 1;
+				const response = (await tessApiRequest.call(this, 'GET', '/agents', undefined, {
+					page,
+					per_page: 50,
+					...(filter ? { q: filter } : {}),
+				})) as IDataObject;
+				const agents = (response.data as IDataObject[] | undefined) ?? [];
+				const lastPage = Number(response.last_page ?? page);
+				return {
+					results: agents.map((agent) => ({
+						name: `${agent.title} (#${agent.id})`,
+						value: String(agent.id),
+					})),
+					paginationToken: page < lastPage ? String(page + 1) : undefined,
+				};
+			},
+		},
+
+		loadOptions: {
+			async getMemoryCollections(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+				const collections = await tessApiRequestAllItems.call(
+					this,
+					'/memory-collections',
+					'collections',
+				);
+				return collections.map((c) => ({
+					name: String(c.display_name || c.name || c.id),
+					value: c.id as number,
+				}));
+			},
+		},
+
+		resourceMapping: {
+			async getAgentInputs(this: ILoadOptionsFunctions): Promise<ResourceMapperFields> {
+				const agentId = this.getNodeParameter('agent', undefined, { extractValue: true }) as string;
+				if (!agentId) return { fields: [] };
+
+				const agent = (await tessApiRequest.call(this, 'GET', `/agents/${agentId}`)) as IDataObject;
+				const questions = ((agent.questions as AgentQuestion[] | undefined) ?? []).filter(
+					(q) => q?.name && !RESERVED_INPUTS.includes(q.name),
+				);
+
+				const fields: ResourceMapperField[] = questions.map((q) => {
+					const hasOptions =
+						q.type === 'select' && Array.isArray(q.options) && q.options.length > 0;
+					const type: FieldType =
+						q.type === 'number' ? 'number' : hasOptions ? 'options' : 'string';
+					return {
+						id: q.name,
+						displayName: q.description ? `${q.name} (${q.description})` : q.name,
+						required: Boolean(q.required),
+						defaultMatch: false,
+						canBeUsedToMatch: false,
+						display: true,
+						type,
+						...(hasOptions
+							? { options: q.options!.map((o) => ({ name: String(o), value: String(o) })) }
+							: {}),
+					};
+				});
+
+				return { fields };
+			},
+		},
+	};
+
+	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
+		const items = this.getInputData();
+		const returnData: INodeExecutionData[] = [];
+
+		for (let i = 0; i < items.length; i++) {
+			try {
+				const resource = this.getNodeParameter('resource', i) as string;
+				const operation = this.getNodeParameter('operation', i) as string;
+				let result: IDataObject | IDataObject[];
+
+				if (resource === 'agent') {
+					result = await executeAgent.call(this, operation, i);
+				} else if (resource === 'agentResponse') {
+					result = await executeAgentResponse.call(this, operation, i);
+				} else if (resource === 'file') {
+					result = await executeFile.call(this, operation, i);
+				} else if (resource === 'memory') {
+					result = await executeMemory.call(this, operation, i);
+				} else if (resource === 'memoryCollection') {
+					result = await getMany.call(this, i, '/memory-collections', 'collections', {
+						search: (this.getNodeParameter('filters', i, {}) as IDataObject).search,
+					});
+				} else {
+					throw new NodeOperationError(this.getNode(), `Unknown resource: ${resource}`, {
+						itemIndex: i,
+					});
+				}
+
+				const executionData = this.helpers.constructExecutionMetaData(
+					this.helpers.returnJsonArray(result),
+					{ itemData: { item: i } },
+				);
+				returnData.push(...executionData);
+			} catch (error) {
+				if (this.continueOnFail()) {
+					returnData.push({ json: { error: (error as Error).message }, pairedItem: { item: i } });
+					continue;
+				}
+				// re-embrulhar um NodeApiError/NodeOperationError devolve o proprio erro; so marcamos o item
+				if (
+					(error instanceof NodeApiError || error instanceof NodeOperationError) &&
+					error.context
+				) {
+					error.context.itemIndex ??= i;
+				}
+				if (error instanceof NodeApiError) {
+					throw new NodeApiError(this.getNode(), error as unknown as JsonObject, { itemIndex: i });
+				}
+				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex: i });
+			}
+		}
+
+		return [returnData];
+	}
+}
+
+// ---------------------------------------------------------------------------
+
+function cleanQuery(qs: IDataObject): IDataObject {
+	return Object.fromEntries(
+		Object.entries(qs).filter(([, v]) => v !== undefined && v !== '' && v !== 0),
+	);
+}
+
+async function getMany(
+	this: IExecuteFunctions,
+	i: number,
+	endpoint: string,
+	dataKey: string,
+	qs: IDataObject = {},
+	perPage = 50,
+): Promise<IDataObject[]> {
+	const returnAll = this.getNodeParameter('returnAll', i) as boolean;
+	const limit = returnAll ? undefined : (this.getNodeParameter('limit', i) as number);
+	return await tessApiRequestAllItems.call(this, endpoint, dataKey, cleanQuery(qs), {
+		limit,
+		perPage,
+	});
+}
+
+async function executeAgent(this: IExecuteFunctions, operation: string, i: number) {
+	if (operation === 'getMany') {
+		const filters = this.getNodeParameter('filters', i, {}) as IDataObject;
+		return await getMany.call(this, i, '/agents', 'data', filters);
+	}
+
+	const agentId = this.getNodeParameter('agent', i, '', { extractValue: true }) as string;
+	if (!/^[0-9]+$/.test(String(agentId))) {
+		throw new NodeOperationError(this.getNode(), `Invalid agent ID: "${agentId}"`, {
+			itemIndex: i,
+		});
+	}
+
+	if (operation === 'get') {
+		return (await tessApiRequest.call(this, 'GET', `/agents/${agentId}`)) as IDataObject;
+	}
+
+	if (operation === 'linkFiles') {
+		const fileIds = parseIdList(this.getNodeParameter('fileIds', i));
+		if (!fileIds.length)
+			throw new NodeOperationError(this.getNode(), 'Inform at least one file ID', { itemIndex: i });
+		return (await tessApiRequest.call(this, 'POST', `/agents/${agentId}/files`, {
+			file_ids: fileIds,
+		})) as IDataObject;
+	}
+
+	if (operation === 'execute') {
+		const message = this.getNodeParameter('message', i, '') as string;
+		const inputs = (this.getNodeParameter('inputs.value', i, {}) as IDataObject | null) ?? {};
+		const wait = this.getNodeParameter('waitForCompletion', i, true) as boolean;
+		const options = this.getNodeParameter('options', i, {}) as IDataObject;
+
+		const body: IDataObject = {};
+		for (const [key, value] of Object.entries(inputs)) {
+			if (value !== null && value !== undefined && value !== '') body[key] = value;
+		}
+
+		let messages: IDataObject[] = [];
+		if (options.messages !== undefined && options.messages !== '' && options.messages !== '[]') {
+			const parsed =
+				typeof options.messages === 'string'
+					? jsonParse<unknown>(options.messages)
+					: options.messages;
+			if (!Array.isArray(parsed)) {
+				throw new NodeOperationError(this.getNode(), '"Chat History (JSON)" must be a JSON array', {
+					itemIndex: i,
+				});
+			}
+			messages = parsed as IDataObject[];
+		} else if (message.trim()) {
+			messages = [{ role: 'user', content: message }];
+		}
+		if (messages.length) body.messages = messages;
+
+		if (options.model) body.model = options.model;
+		if (options.temperature !== undefined) body.temperature = String(options.temperature);
+		if (options.tools) body.tools = options.tools;
+		if (options.rootId) body.root_id = options.rootId;
+		const fileIds = parseIdList(options.fileIds);
+		if (fileIds.length) body.file_ids = fileIds;
+		const collections = parseIdList(options.memoryCollections);
+		if (collections.length) body.memory_collections = collections;
+		body.waitExecution = wait;
+
+		const response = (await tessApiRequest.call(
+			this,
+			'POST',
+			`/agents/${agentId}/execute`,
+			body,
+		)) as IDataObject;
+		let execution = ((response.responses as IDataObject[] | undefined)?.[0] ??
+			response) as IDataObject;
+
+		if (wait) {
+			execution = await waitForAgentResponse.call(this, execution, i, {
+				timeoutSeconds: (options.timeout as number) ?? 600,
+				intervalSeconds: (options.pollInterval as number) ?? 3,
+			});
+			if (execution.status !== 'succeeded') {
+				throw new NodeOperationError(
+					this.getNode(),
+					`Agent execution ${execution.id} ended with status "${execution.status}"`,
+					{ itemIndex: i, description: String(execution.output ?? '') },
+				);
+			}
+		}
+
+		return { ...execution, agent_id: Number(agentId) };
+	}
+
+	throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
+}
+
+async function executeAgentResponse(this: IExecuteFunctions, operation: string, i: number) {
+	if (operation === 'get') {
+		const id = String(this.getNodeParameter('responseId', i)).trim();
+		return (await tessApiRequest.call(
+			this,
+			'GET',
+			`/agent-responses/${encodeURIComponent(id)}`,
+		)) as IDataObject;
+	}
+	if (operation === 'getMany') {
+		const filters = this.getNodeParameter('filters', i, {}) as IDataObject;
+		return await getMany.call(this, i, '/agent-responses', 'data', { sort: 'desc', ...filters });
+	}
+	throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
+}
+
+async function executeFile(this: IExecuteFunctions, operation: string, i: number) {
+	if (operation === 'upload') {
+		const binaryPropertyName = this.getNodeParameter('binaryPropertyName', i) as string;
+		const process = this.getNodeParameter('process', i, true) as boolean;
+		const binaryData = this.helpers.assertBinaryData(i, binaryPropertyName);
+		const buffer = await this.helpers.getBinaryDataBuffer(i, binaryPropertyName);
+
+		const form = new FormData();
+		form.append(
+			'file',
+			new Blob([new Uint8Array(buffer)], {
+				type: binaryData.mimeType || 'application/octet-stream',
+			}),
+			binaryData.fileName || 'file',
+		);
+		form.append('process', process ? 'true' : 'false');
+
+		return (await tessApiRequest.call(this, 'POST', '/files', form)) as IDataObject;
+	}
+	if (operation === 'get' || operation === 'process') {
+		const fileId = encodeURIComponent(String(this.getNodeParameter('fileId', i)).trim());
+		return operation === 'get'
+			? ((await tessApiRequest.call(this, 'GET', `/files/${fileId}`)) as IDataObject)
+			: ((await tessApiRequest.call(this, 'POST', `/files/${fileId}/process`)) as IDataObject);
+	}
+	if (operation === 'getMany') {
+		const order = this.getNodeParameter('order', i, 'desc') as string;
+		return await getMany.call(this, i, '/files', 'data', { order }, 100);
+	}
+	throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
+}
+
+async function executeMemory(this: IExecuteFunctions, operation: string, i: number) {
+	if (operation === 'create') {
+		const body: IDataObject = { memory: this.getNodeParameter('memory', i) as string };
+		const collectionId = this.getNodeParameter('collectionId', i, '') as string | number;
+		if (collectionId !== '' && collectionId !== null) body.collection_id = Number(collectionId);
+		const response = (await tessApiRequest.call(this, 'POST', '/memories', body)) as IDataObject;
+		return (response.memory as IDataObject | undefined) ?? response;
+	}
+	if (operation === 'getMany') {
+		const filters = this.getNodeParameter('filters', i, {}) as IDataObject;
+		return await getMany.call(this, i, '/memories', 'memories', filters);
+	}
+	throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
+}

@@ -1,46 +1,69 @@
 # @conasa/n8n-nodes-tess-ai
 
-This is an n8n community node. It lets you use _app/service name_ in your n8n workflows.
+Community node do n8n para a API da [Tess AI](https://tess.im): executar agentes, consultar execuções, enviar
+arquivos e gerenciar memórias.
 
-_App/service name_ is _one or two sentences describing the service this node integrates with_.
+## Instalação
 
-[n8n](https://n8n.io/) is a [fair-code licensed](https://docs.n8n.io/sustainable-use-license/) workflow automation platform.
+n8n self-hosted: *Settings* → *Community Nodes* → *Install* → `@conasa/n8n-nodes-tess-ai`.
 
-[Installation](#installation)
-[Operations](#operations)
-[Credentials](#credentials)
-[Compatibility](#compatibility)
-[Usage](#usage)
-[Resources](#resources)
-[Version history](#version-history)
+## Credenciais
 
-## Installation
+Crie uma credencial **Tess AI API**:
 
-Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes/installation/) in the n8n community nodes documentation.
+| Campo | Onde encontrar |
+|---|---|
+| API Key | Tess → *Settings* → *API Tokens* |
+| Workspace ID | Tess → *Settings* → *Workspace* (número), ou o parâmetro `w=` na URL do app. Obrigatório em todas as chamadas desde 01/09/2026 |
+| Base URL | `https://api.tess.im` (padrão) |
 
-## Operations
+O botão **Test** lista um agente para validar token e workspace.
 
-_List the operations supported by your node._
+## Operações
 
-## Credentials
+| Recurso | Operações |
+|---|---|
+| **Agent** | **Execute** — roda o agente e devolve a resposta; **Get**; **Get Many**; **Link Files** (arquivos como base de conhecimento) |
+| **Agent Response** | **Get** — status/saída de uma execução; **Get Many** (filtros por agente, conversa, busca) |
+| **File** | **Upload** (até 32 MB, com processamento opcional); **Get**; **Get Many**; **Process** |
+| **Memory** | **Create**; **Get Many** (por coleção) |
+| **Memory Collection** | **Get Many** |
 
-_If users need to authenticate with the app/service, provide details here. You should include prerequisites (such as signing up with the service), available authentication methods, and how to set them up._
+### Agent → Execute
 
-## Compatibility
+- **Agent**: escolha da lista (busca por nome), por ID ou pela URL do agente.
+- **Message**: mensagem do usuário (agentes de chat). Vira `messages: [{ role: "user", content }]`.
+- **Agent Inputs**: os campos que o agente define (ex.: "nome-da-empresa", "language") são carregados
+  automaticamente depois de escolher o agente.
+- **Wait for Completion** (padrão: ligado): a Tess responde em até 100 s; se a execução continuar, o node consulta
+  `/agent-responses/{id}` a cada *Poll Interval* até terminar ou atingir o *Timeout* (padrão 600 s).
+  Desligado, devolve o ID da execução na hora — consulte depois com *Agent Response → Get*.
+- **Options**: Chat History (JSON no formato OpenAI), Continue Conversation (`root_id` de uma execução anterior),
+  File IDs, Memory Collection IDs, Model, Temperature, Tools.
 
-_State the minimum n8n version, as well as which versions you test against. You can also include any known version incompatibility issues._
+Saída: o objeto da execução (`id`, `status`, `output`, `credits`, `root_id`, `generated_files`…) + `agent_id`.
+Execução com status diferente de `succeeded` gera erro (use *Continue On Fail* para tratar no fluxo).
 
-## Usage
+### Exemplo: analisar um PDF
 
-_This is an optional section. Use it to help users with any difficult or confusing aspects of the node._
+```
+Read Binary File → Tess AI (File → Upload, Process After Upload) → Tess AI (Agent → Execute, Options → File IDs = {{ $json.id }})
+```
 
-_By the time users are looking for community nodes, they probably already know n8n basics. But if you expect new users, you can link to the [Try it out](https://docs.n8n.io/try-it-out/) documentation to help them get started._
+### Uso como ferramenta de AI Agent
 
-## Resources
+O node tem `usableAsTool`: pode ser ligado como *tool* de um AI Agent do n8n (exige
+`N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true` no n8n).
 
-* [n8n community nodes documentation](https://docs.n8n.io/integrations/#community-nodes)
-* _Link to app/service documentation._
+## Compatibilidade
 
-## Version history
+Desenvolvido para n8n 2.41.x (Node.js 24).
 
-_This is another optional section. If your node has multiple versions, include a short description of available versions and what changed, as well as any compatibility impact._
+## Recursos
+
+- [Documentação da API da Tess](https://docs.tess.im/en/api-overview)
+- [Community nodes do n8n](https://docs.n8n.io/integrations/#community-nodes)
+
+## Histórico de versões
+
+Ver [CHANGELOG.md](CHANGELOG.md).
