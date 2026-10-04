@@ -248,6 +248,15 @@ export const agentFields: INodeProperties[] = [
 		displayOptions: showFor(['execute']),
 		options: [
 			{
+				displayName: 'Attachments (Binary Fields)',
+				name: 'attachments',
+				type: 'string',
+				default: '',
+				placeholder: 'data, data_1',
+				description:
+					'Comma-separated names of binary fields of the input item to attach. Each file is uploaded (up to 200 MB), processed and sent with this execution — no separate File nodes needed.',
+			},
+			{
 				displayName: 'Continue Conversation (Root ID)',
 				name: 'rootId',
 				type: 'number',
@@ -286,7 +295,8 @@ export const agentFields: INodeProperties[] = [
 				type: 'number',
 				typeOptions: { minValue: 1 },
 				default: 3,
-				description: 'How often to check the execution status while waiting',
+				description:
+					'Initial interval to check the execution status while waiting. It grows up to 15 s to save API calls (Tess allows about 1 request per second).',
 			},
 			{
 				displayName: 'Previous Messages',

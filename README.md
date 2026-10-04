@@ -16,8 +16,31 @@ Crie uma credencial **Tess AI API**:
 | API Key | Tess → *Settings* → *API Tokens* |
 | Workspace ID | Tess → *Settings* → *Workspace* (número), ou o parâmetro `w=` na URL do app. Obrigatório em todas as chamadas desde 01/09/2026 |
 | Base URL | `https://api.tess.im` (padrão) |
+| Requests per Second | limite de chamadas por segundo deste token, somando **todos** os workflows (padrão 1, o limite da Tess) |
+| Rate Limit Coordination | **Auto** (padrão), *In-Memory* ou *Redis (Custom)* — ver abaixo |
 
 O botão **Test** lista um agente para validar token e workspace.
+
+## Limite de requisições (fila global)
+
+A Tess aceita cerca de **1 requisição por segundo por token** e responde `429` acima disso. O n8n não coordena
+limites de API entre workflows, então o node mantém uma **fila própria por credencial**: todas as chamadas — de
+todos os workflows e execuções — saem em ordem, no máximo *Requests per Second* por segundo.
+
+- **n8n em um processo**: a fila fica na memória do processo.
+- **n8n em queue mode (main + workers)**: com *Rate Limit Coordination = Auto*, a fila é compartilhada pelo
+  **Redis que o n8n já usa** (`QUEUE_BULL_REDIS_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_DB`, `_TLS`, inclusive
+  as variantes `_FILE`) — sem configuração extra. Chave: `n8n-tess:rl:<hash>`. Redis Cluster não é suportado
+  (cai para a memória). *Redis (Custom)* permite apontar outro Redis.
+- Se o Redis estiver fora, o node usa a fila em memória (e tenta o Redis de novo a cada 30 s), com aviso no log.
+- Se mesmo assim vier `429`, o node espera o `retry_after` informado pela Tess e tenta de novo (até 3 vezes).
+- Enquanto espera um agente ou um arquivo, o intervalo de consulta cresce até 15 s para gastar menos da cota.
+
+> Este pacote usa `node:net`/`process.env` para falar com o Redis, por isso é publicado **sem** "cloud support"
+> do n8n (vale para self-hosted; não é elegível à verificação para o n8n Cloud).
+
+Erros comuns viram mensagens diretas: API Key inválida (401/403), Workspace ID ausente (422), ID não encontrado
+(404), arquivo grande demais (413), limite da Tess (429).
 
 ## Operações
 
@@ -25,9 +48,12 @@ O botão **Test** lista um agente para validar token e workspace.
 |---|---|
 | **Agent** | **Execute** — roda o agente e devolve a resposta; **Get**; **Get Many**; **Link Files** (arquivos como base de conhecimento) |
 | **Agent Response** | **Get** — status/saída de uma execução; **Get Many** (filtros por agente, conversa, busca) |
-| **File** | **Upload** (até 32 MB, com processamento opcional); **Get**; **Get Many**; **Process** |
-| **Memory** | **Create**; **Get Many** (por coleção) |
-| **Memory Collection** | **Get Many** |
+| **File** | **Upload** (até 200 MB; processa e espera ficar pronto, opcional); **Get**; **Get Many**; **Process** |
+| **Memory** | **Create**; **Update**; **Delete**; **Get Many** (por coleção) |
+| **Memory Collection** | **Create**; **Update** (renomear); **Delete** (apaga também as memórias; a coleção padrão não pode ser apagada); **Get Many** |
+
+Upload: até 32 MB vai direto (`POST /files`); de 32 MB a 200 MB usa o fluxo v2 da Tess (URL assinada →
+envio direto ao storage → registro), automaticamente.
 
 ### Agent → Execute
 
@@ -71,7 +97,10 @@ O botão **Test** lista um agente para validar token e workspace.
   - **Previous Messages** / **Previous Messages (JSON)**: só quando o histórico está fora da Tess (ex.: um chat
     guardado em outro sistema). As mensagens vão antes de *Message*. A versão JSON aceita uma expressão que
     devolve a lista `[{ "role": "user"|"assistant", "content": "..." }]`.
-  - File IDs, Memory Collection IDs, Poll Interval, Timeout.
+  - **Attachments (Binary Fields)**: nomes dos campos binários do item (ex.: `data, data_1`). Cada arquivo é
+    enviado (até 200 MB), processado e anexado à execução — sem nodes de File separados. A saída ganha
+    `uploaded_files`.
+  - File IDs (arquivos já enviados; somam com os anexos), Memory Collection IDs, Poll Interval, Timeout.
 
 Saída: o objeto da execução (`id`, `status`, `output`, `credits`, `root_id`, `generated_files`…) + `agent_id`.
 Execução com status diferente de `succeeded` gera erro (use *Continue On Fail* para tratar no fluxo).
@@ -79,7 +108,7 @@ Execução com status diferente de `succeeded` gera erro (use *Continue On Fail*
 ### Exemplo: analisar um PDF
 
 ```
-Read Binary File → Tess AI (File → Upload, Process After Upload) → Tess AI (Agent → Execute, Options → File IDs = {{ $json.id }})
+Read Binary File → Tess AI (Agent → Execute, Options → Attachments = data)
 ```
 
 ### Uso como ferramenta de AI Agent

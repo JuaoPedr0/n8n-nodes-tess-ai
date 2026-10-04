@@ -1,6 +1,9 @@
 import type { INodeProperties } from 'n8n-workflow';
 
 const showFor = (operation: string[]) => ({ show: { resource: ['memory'], operation } });
+const showCollectionFor = (operation: string[]) => ({
+	show: { resource: ['memoryCollection'], operation },
+});
 
 export const memoryOperations: INodeProperties[] = [
 	{
@@ -12,10 +15,22 @@ export const memoryOperations: INodeProperties[] = [
 		options: [
 			{ name: 'Create', value: 'create', description: 'Store a memory', action: 'Create a memory' },
 			{
+				name: 'Delete',
+				value: 'delete',
+				description: 'Delete a memory',
+				action: 'Delete a memory',
+			},
+			{
 				name: 'Get Many',
 				value: 'getMany',
 				description: 'List memories',
 				action: 'Get many memories',
+			},
+			{
+				name: 'Update',
+				value: 'update',
+				description: 'Change the content or the collection of a memory',
+				action: 'Update a memory',
 			},
 		],
 		default: 'create',
@@ -24,6 +39,15 @@ export const memoryOperations: INodeProperties[] = [
 
 export const memoryFields: INodeProperties[] = [
 	{
+		displayName: 'Memory ID',
+		name: 'memoryId',
+		type: 'string',
+		required: true,
+		default: '',
+		placeholder: '10',
+		displayOptions: showFor(['update', 'delete']),
+	},
+	{
 		displayName: 'Memory',
 		name: 'memory',
 		type: 'string',
@@ -31,7 +55,7 @@ export const memoryFields: INodeProperties[] = [
 		required: true,
 		default: '',
 		description: 'Content to remember (up to 32,000 characters)',
-		displayOptions: showFor(['create']),
+		displayOptions: showFor(['create', 'update']),
 	},
 	{
 		displayName: 'Collection Name or ID',
@@ -40,8 +64,8 @@ export const memoryFields: INodeProperties[] = [
 		typeOptions: { loadOptionsMethod: 'getMemoryCollections' },
 		default: '',
 		description:
-			'Collection to store the memory in. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
-		displayOptions: showFor(['create']),
+			'Collection to store the memory in (empty = default collection). Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+		displayOptions: showFor(['create', 'update']),
 	},
 	{
 		displayName: 'Return All',
@@ -90,10 +114,28 @@ export const memoryCollectionOperations: INodeProperties[] = [
 		displayOptions: { show: { resource: ['memoryCollection'] } },
 		options: [
 			{
+				name: 'Create',
+				value: 'create',
+				description: 'Create a memory collection',
+				action: 'Create a memory collection',
+			},
+			{
+				name: 'Delete',
+				value: 'delete',
+				description: 'Delete a memory collection and all its memories',
+				action: 'Delete a memory collection',
+			},
+			{
 				name: 'Get Many',
 				value: 'getMany',
 				description: 'List memory collections',
 				action: 'Get many memory collections',
+			},
+			{
+				name: 'Update',
+				value: 'update',
+				description: 'Rename a memory collection',
+				action: 'Update a memory collection',
 			},
 		],
 		default: 'getMany',
@@ -102,12 +144,40 @@ export const memoryCollectionOperations: INodeProperties[] = [
 
 export const memoryCollectionFields: INodeProperties[] = [
 	{
+		displayName: 'Collection Name or ID',
+		name: 'collectionId',
+		type: 'options',
+		typeOptions: { loadOptionsMethod: 'getMemoryCollections' },
+		required: true,
+		default: '',
+		description:
+			'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
+		displayOptions: showCollectionFor(['update', 'delete']),
+	},
+	{
+		displayName:
+			'Deleting a collection also deletes all of its memories. The default collection cannot be deleted.',
+		name: 'deleteNotice',
+		type: 'notice',
+		default: '',
+		displayOptions: showCollectionFor(['delete']),
+	},
+	{
+		displayName: 'Name',
+		name: 'name',
+		type: 'string',
+		required: true,
+		default: '',
+		placeholder: 'e.g. Contratos',
+		displayOptions: showCollectionFor(['create', 'update']),
+	},
+	{
 		displayName: 'Return All',
 		name: 'returnAll',
 		type: 'boolean',
 		default: false,
 		description: 'Whether to return all results or only up to a given limit',
-		displayOptions: { show: { resource: ['memoryCollection'], operation: ['getMany'] } },
+		displayOptions: showCollectionFor(['getMany']),
 	},
 	{
 		displayName: 'Limit',
@@ -126,7 +196,7 @@ export const memoryCollectionFields: INodeProperties[] = [
 		type: 'collection',
 		placeholder: 'Add Filter',
 		default: {},
-		displayOptions: { show: { resource: ['memoryCollection'], operation: ['getMany'] } },
+		displayOptions: showCollectionFor(['getMany']),
 		options: [
 			{
 				displayName: 'Search',

@@ -22,7 +22,7 @@ export const fileOperations: INodeProperties[] = [
 			{
 				name: 'Upload',
 				value: 'upload',
-				description: 'Upload a file (up to 32 MB)',
+				description: 'Upload a file (up to 200 MB)',
 				action: 'Upload a file',
 			},
 		],
@@ -48,6 +48,31 @@ export const fileFields: INodeProperties[] = [
 		description:
 			'Whether to process the file right after upload so it can be used by agents (consumes credits)',
 		displayOptions: showFor(['upload']),
+	},
+	{
+		displayName: 'Wait for Processing',
+		name: 'waitForProcessing',
+		type: 'boolean',
+		default: true,
+		description:
+			'Whether to wait until Tess finishes processing the file (status "completed") before continuing',
+		displayOptions: { show: { resource: ['file'], operation: ['upload'], process: [true] } },
+	},
+	{
+		displayName: 'Processing Timeout (Seconds)',
+		name: 'processingTimeout',
+		type: 'number',
+		typeOptions: { minValue: 0 },
+		default: 600,
+		description: 'Maximum time to wait for the processing. 0 = no limit.',
+		displayOptions: {
+			show: {
+				resource: ['file'],
+				operation: ['upload'],
+				process: [true],
+				waitForProcessing: [true],
+			},
+		},
 	},
 	{
 		displayName: 'File ID',

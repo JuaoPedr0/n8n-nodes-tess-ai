@@ -38,6 +38,7 @@ import {
 	parseIdList,
 	tessApiRequest,
 	tessApiRequestAllItems,
+	uploadBinary,
 	waitForAgentResponse,
 } from './GenericFunctions';
 
@@ -256,9 +257,7 @@ export class TessAi implements INodeType {
 				} else if (resource === 'memory') {
 					result = await executeMemory.call(this, operation, i);
 				} else if (resource === 'memoryCollection') {
-					result = await getMany.call(this, i, '/memory-collections', 'collections', {
-						search: (this.getNodeParameter('filters', i, {}) as IDataObject).search,
-					});
+					result = await executeMemoryCollection.call(this, operation, i);
 				} else {
 					throw new NodeOperationError(this.getNode(), `Unknown resource: ${resource}`, {
 						itemIndex: i,
@@ -405,8 +404,28 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 		}
 		if (options.tools) body.tools = options.tools;
 		if (options.rootId) body.root_id = options.rootId;
-		const fileIds = parseIdList(options.fileIds);
+		// anexos: binários do item → upload + processamento → file_ids (junto com "File IDs")
+		const uploadedFiles: IDataObject[] = [];
+		const binaryFields = String(options.attachments ?? '')
+			.split(',')
+			.map((f) => f.trim())
+			.filter(Boolean);
+		for (const field of binaryFields) {
+			const file = await uploadBinary.call(this, i, field, {
+				process: true,
+				waitForProcessing: true,
+				timeoutSeconds: (options.timeout as number) ?? 600,
+			});
+			uploadedFiles.push({
+				id: file.id,
+				filename: file.filename,
+				bytes: file.bytes,
+				status: file.status,
+			});
+		}
+		const fileIds = [...uploadedFiles.map((f) => Number(f.id)), ...parseIdList(options.fileIds)];
 		if (fileIds.length) body.file_ids = fileIds;
+		const extra: IDataObject = uploadedFiles.length ? { uploaded_files: uploadedFiles } : {};
 		const collections = parseIdList(options.memoryCollections);
 		if (collections.length) body.memory_collections = collections;
 		body.waitExecution = wait;
@@ -454,6 +473,7 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 						json_attempts: attempt + 1,
 						json_fixes: checked!.fixes,
 						agent_id: Number(agentId),
+						...extra,
 					};
 				}
 				if (attempt >= maxRetries) {
@@ -481,7 +501,7 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 			}
 		}
 
-		return { ...execution, agent_id: Number(agentId) };
+		return { ...execution, agent_id: Number(agentId), ...extra };
 	}
 
 	throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
@@ -507,20 +527,14 @@ async function executeFile(this: IExecuteFunctions, operation: string, i: number
 	if (operation === 'upload') {
 		const binaryPropertyName = this.getNodeParameter('binaryPropertyName', i) as string;
 		const process = this.getNodeParameter('process', i, true) as boolean;
-		const binaryData = this.helpers.assertBinaryData(i, binaryPropertyName);
-		const buffer = await this.helpers.getBinaryDataBuffer(i, binaryPropertyName);
-
-		const form = new FormData();
-		form.append(
-			'file',
-			new Blob([new Uint8Array(buffer)], {
-				type: binaryData.mimeType || 'application/octet-stream',
-			}),
-			binaryData.fileName || 'file',
-		);
-		form.append('process', process ? 'true' : 'false');
-
-		return (await tessApiRequest.call(this, 'POST', '/files', form)) as IDataObject;
+		const waitForProcessing = process
+			? (this.getNodeParameter('waitForProcessing', i, true) as boolean)
+			: false;
+		return await uploadBinary.call(this, i, binaryPropertyName, {
+			process,
+			waitForProcessing,
+			timeoutSeconds: this.getNodeParameter('processingTimeout', i, 600) as number,
+		});
 	}
 	if (operation === 'get' || operation === 'process') {
 		const fileId = encodeURIComponent(String(this.getNodeParameter('fileId', i)).trim());
@@ -536,16 +550,63 @@ async function executeFile(this: IExecuteFunctions, operation: string, i: number
 }
 
 async function executeMemory(this: IExecuteFunctions, operation: string, i: number) {
-	if (operation === 'create') {
-		const body: IDataObject = { memory: this.getNodeParameter('memory', i) as string };
+	const collectionBody = (body: IDataObject) => {
 		const collectionId = this.getNodeParameter('collectionId', i, '') as string | number;
 		if (collectionId !== '' && collectionId !== null) body.collection_id = Number(collectionId);
-		const response = (await tessApiRequest.call(this, 'POST', '/memories', body)) as IDataObject;
+		return body;
+	};
+	const memoryId = () => encodeURIComponent(String(this.getNodeParameter('memoryId', i)).trim());
+
+	if (operation === 'create' || operation === 'update') {
+		const body = collectionBody({ memory: this.getNodeParameter('memory', i) as string });
+		const response = (await tessApiRequest.call(
+			this,
+			operation === 'create' ? 'POST' : 'PATCH',
+			operation === 'create' ? '/memories' : `/memories/${memoryId()}`,
+			body,
+		)) as IDataObject;
 		return (response.memory as IDataObject | undefined) ?? response;
+	}
+	if (operation === 'delete') {
+		const id = memoryId();
+		const response = (await tessApiRequest.call(this, 'DELETE', `/memories/${id}`)) as IDataObject;
+		return { deleted: true, id: Number(id) || id, message: response?.message };
 	}
 	if (operation === 'getMany') {
 		const filters = this.getNodeParameter('filters', i, {}) as IDataObject;
 		return await getMany.call(this, i, '/memories', 'memories', filters);
+	}
+	throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
+}
+
+async function executeMemoryCollection(this: IExecuteFunctions, operation: string, i: number) {
+	const collectionId = () =>
+		encodeURIComponent(String(this.getNodeParameter('collectionId', i)).trim());
+
+	if (operation === 'create' || operation === 'update') {
+		const body = { name: this.getNodeParameter('name', i) as string };
+		const response = (await tessApiRequest.call(
+			this,
+			operation === 'create' ? 'POST' : 'PUT',
+			operation === 'create' ? '/memory-collections' : `/memory-collections/${collectionId()}`,
+			body,
+		)) as IDataObject;
+		return (response.collection as IDataObject | undefined) ?? response;
+	}
+	if (operation === 'delete') {
+		const id = collectionId();
+		const response = (await tessApiRequest.call(
+			this,
+			'DELETE',
+			`/memory-collections/${id}`,
+		)) as IDataObject;
+		return { deleted: true, id: Number(id) || id, message: response?.message };
+	}
+	if (operation === 'getMany') {
+		const filters = this.getNodeParameter('filters', i, {}) as IDataObject;
+		return await getMany.call(this, i, '/memory-collections', 'collections', {
+			search: filters.search,
+		});
 	}
 	throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
 }
