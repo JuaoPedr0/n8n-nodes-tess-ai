@@ -10,7 +10,6 @@ import type {
 import { NodeApiError, NodeOperationError, sleep } from 'n8n-workflow';
 
 import { limiterKey, reserveSlot } from './RateLimiter';
-import type { CoordinationMode } from './RateLimiter';
 
 type TessContext = IExecuteFunctions | ILoadOptionsFunctions;
 
@@ -102,29 +101,28 @@ function friendlyError(this: TessContext, error: unknown): NodeApiError {
 	return apiError;
 }
 
-/** Espera a vez desta chamada na fila da credencial (memoria do processo ou Redis do n8n). */
+/** Espera a vez desta chamada na fila do token (Redis do n8n). Sem Redis, falha. */
 async function waitTurn(this: TessContext, credentials: IDataObject): Promise<void> {
-	const mode = (credentials.rateLimitMode as CoordinationMode) || 'auto';
-	const { waitMs } = await reserveSlot({
+	const slot = await reserveSlot({
 		identity: limiterKey(String(credentials.apiKey ?? '')),
 		requestsPerSecond: Number(credentials.requestsPerSecond ?? 1) || 1,
-		mode,
-		redis:
-			mode === 'redis'
-				? {
-						host: String(credentials.redisHost || 'localhost'),
-						port: Number(credentials.redisPort || 6379),
-						username: credentials.redisUsername ? String(credentials.redisUsername) : undefined,
-						password: credentials.redisPassword ? String(credentials.redisPassword) : undefined,
-						db: Number(credentials.redisDatabase || 0),
-						tls: Boolean(credentials.redisTls),
-					}
-				: undefined,
-		log: {
-			info: (message) => this.logger?.info(message),
-			warn: (message) => this.logger?.warn(message),
-		},
+		log: { info: (message) => this.logger?.info(message) },
 	});
+	if (!slot.ok) {
+		throw new NodeOperationError(
+			this.getNode(),
+			`Tess AI rate limit queue unavailable: ${slot.problem}`,
+			{
+				description: [
+					slot.detail ? `Detail: ${slot.detail}.` : '',
+					'Every Tess AI call goes through a shared queue in the n8n Redis (QUEUE_BULL_REDIS_* variables) so all workflows and workers respect the Tess limit together. Check that Redis is running and reachable from this n8n process.',
+				]
+					.filter(Boolean)
+					.join(' '),
+			},
+		);
+	}
+	const waitMs = slot.waitMs;
 	if (waitMs > 0) await sleep(waitMs);
 }
 

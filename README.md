@@ -16,8 +16,7 @@ Crie uma credencial **Tess AI API**:
 | API Key | Tess → *Settings* → *API Tokens* |
 | Workspace ID | Tess → *Settings* → *Workspace* (número), ou o parâmetro `w=` na URL do app. Obrigatório em todas as chamadas desde 01/09/2026 |
 | Base URL | `https://api.tess.im` (padrão) |
-| Requests per Second | limite de chamadas por segundo deste token, somando **todos** os workflows (padrão 1, o limite da Tess) |
-| Rate Limit Coordination | **Auto** (padrão), *In-Memory* ou *Redis (Custom)* — ver abaixo |
+| Requests per Second | limite de chamadas por segundo deste token, somando **todos** os workflows e workers (padrão 1, o limite da Tess) |
 
 O botão **Test** lista um agente para validar token e workspace.
 
@@ -28,13 +27,13 @@ limites de API entre workflows, então o node mantém uma **fila própria por AP
 token, mesmo em workspaces diferentes, dividem a mesma fila): todas as chamadas — de todos os workflows e
 execuções — saem em ordem, no máximo *Requests per Second* por segundo.
 
-- **n8n em um processo**: a fila fica na memória do processo.
-- **n8n em queue mode (main + workers)**: com *Rate Limit Coordination = Auto*, a fila é compartilhada pelo
-  **Redis que o n8n já usa** (`QUEUE_BULL_REDIS_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_DB`, `_TLS`, inclusive
-  as variantes `_FILE`) — sem configuração extra. Chave: `n8n-tess:rl:<hash>`. Redis Cluster não é suportado
-  (cai para a memória). *Redis (Custom)* permite apontar outro Redis.
-- Se o Redis estiver fora ou não responder em 2 s, o node usa a fila em memória e tenta aquele Redis de novo a
-  cada 30 s; queda e retorno aparecem no log (warn). Um Redis com problema não afeta credenciais que usam outro.
+- A fila fica **sempre no Redis da infraestrutura do n8n**, lido das variáveis que o n8n já usa:
+  `QUEUE_BULL_REDIS_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_DB`, `_TLS` (inclusive as variantes `_FILE`).
+  Chave: `n8n-tess:rl:<hash do token>`. Redis Cluster não é suportado.
+- **Sem Redis a execução falha** com `Tess AI rate limit queue unavailable: …` — Redis não configurado, fora do
+  ar ou sem responder em 2 s. O node nunca chama a Tess fora da fila.
+- **n8n local de desenvolvimento**: o painel da central passa ao n8n local as variáveis do Redis da infra,
+  configuradas em `central.local.json` (fora do git; modelo em `central.local.example.json`).
 - Se mesmo assim vier `429`, o node espera o `retry_after` informado pela Tess e tenta de novo (até 3 vezes).
 - Enquanto espera um agente ou um arquivo, o intervalo de consulta cresce até 15 s para gastar menos da cota.
 

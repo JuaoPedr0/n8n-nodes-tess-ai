@@ -1,13 +1,15 @@
 // Fila global de chamadas a API da Tess (limite padrao: 1 requisicao/segundo por token).
 //
-// O n8n nao coordena limites de API entre workflows. Este modulo e carregado uma vez por processo,
-// entao o estado abaixo e compartilhado por todos os workflows/execucoes daquele processo. Em queue mode
-// (main + workers) cada worker e um processo: a coordenacao entre eles usa o Redis do proprio n8n
-// (variaveis QUEUE_BULL_REDIS_*), com um cliente RESP minimo (sem dependencias de runtime).
+// O n8n nao coordena limites de API entre workflows nem entre workers. A fila fica sempre no Redis da
+// infraestrutura do n8n — o mesmo das variaveis QUEUE_BULL_REDIS_* —, entao todas as execucoes de todos
+// os workers (e o n8n local de desenvolvimento, apontado para o mesmo Redis) formam uma fila unica.
+// Cliente RESP minimo, sem dependencias de runtime.
 //
 // Algoritmo: cada chamada "reserva um horario" — o proximo slot livre do token — e espera ate ele.
-// No Redis a reserva e atomica (script Lua) e usa o relogio do Redis, entao todos os workers formam uma
-// fila unica e ordenada.
+// A reserva e atomica (script Lua) e usa o relogio do Redis.
+//
+// Sem Redis (nao configurado, fora do ar ou sem resposta) a chamada FALHA: o node nunca chama a Tess
+// sem passar pela fila.
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -23,8 +25,6 @@ export interface RedisConfig {
 	tls?: boolean;
 }
 
-export type CoordinationMode = 'auto' | 'memory' | 'redis';
-
 export interface LimiterLog {
 	info?: (message: string) => void;
 	warn?: (message: string) => void;
@@ -34,27 +34,14 @@ export interface ReserveOptions {
 	/** chave da fila (ver limiterKey) */
 	identity: string;
 	requestsPerSecond: number;
-	mode: CoordinationMode;
-	/** usado quando mode = 'redis' */
-	redis?: RedisConfig;
 	log?: LimiterLog;
 }
 
+export type ReserveResult =
+	| { ok: true; waitMs: number }
+	| { ok: false; problem: string; detail?: string };
+
 const COMMAND_TIMEOUT_MS = 2000;
-const REDIS_RETRY_AFTER_MS = 30_000;
-
-// ---------------------------------------------------------------------------
-// Fila em memoria (por processo)
-// ---------------------------------------------------------------------------
-
-const nextFreeInMemory = new Map<string, number>();
-
-function reserveInMemory(key: string, intervalMs: number): number {
-	const now = Date.now();
-	const slot = Math.max(now, nextFreeInMemory.get(key) ?? 0);
-	nextFreeInMemory.set(key, slot + intervalMs);
-	return slot - now;
-}
 
 // ---------------------------------------------------------------------------
 // Cliente RESP minimo
@@ -157,10 +144,10 @@ class RedisClient {
 			socket.on('data', (chunk: Buffer) => {
 				if (isCurrent()) this.onData(chunk);
 			});
-			socket.on('timeout', () => fail(new Error(`Redis connection timeout (${host}:${port})`)));
+			socket.on('timeout', () => fail(new Error(`connection timeout (${host}:${port})`)));
 			socket.on('error', (error) => fail(error));
 			socket.on('close', () => {
-				if (isCurrent()) this.reset(new Error('Redis connection closed'));
+				if (isCurrent()) this.reset(new Error('connection closed'));
 			});
 		});
 		return this.ready;
@@ -170,13 +157,13 @@ class RedisClient {
 		return new Promise<RespValue>((resolve, reject) => {
 			const socket = this.socket;
 			if (!socket || socket.destroyed) {
-				reject(new Error('Redis not connected'));
+				reject(new Error('not connected'));
 				return;
 			}
 			// sem resposta a tempo: a conexao fica fora de sincronia → descarta e reconecta depois
 			const timer = globalThis.setTimeout(() => {
 				if (this.socket === socket) {
-					this.reset(new Error(`Redis command timeout (${args[0]}, ${COMMAND_TIMEOUT_MS} ms)`));
+					this.reset(new Error(`no reply to ${args[0]} within ${COMMAND_TIMEOUT_MS} ms`));
 				}
 			}, COMMAND_TIMEOUT_MS);
 			this.pending.push({ resolve, reject, timer });
@@ -229,32 +216,21 @@ redis.call('SET', KEYS[1], tostring(slot + interval), 'PX', (slot + interval - n
 return slot - now
 `;
 
-/** Estado por servidor Redis: um Redis com problema nao afeta credenciais que usam outro. */
-interface RedisState {
-	client: RedisClient;
-	retryAt: number;
-	down: boolean;
-	announced: boolean;
-}
+const clients = new Map<string, RedisClient>();
+let announced = false;
 
-const redisStates = new Map<string, RedisState>();
-
-function redisId(config: RedisConfig): string {
-	return `${config.tls ? 'tls' : 'tcp'}://${config.username ?? ''}@${config.host}:${config.port}/${config.db ?? 0}`;
-}
-
-function stateFor(config: RedisConfig): RedisState {
-	const id = redisId(config);
-	let state = redisStates.get(id);
-	if (!state) {
-		state = { client: new RedisClient(config), retryAt: 0, down: false, announced: false };
-		redisStates.set(id, state);
+function clientFor(config: RedisConfig): RedisClient {
+	const id = `${config.tls ? 'tls' : 'tcp'}://${config.username ?? ''}@${config.host}:${config.port}/${config.db ?? 0}`;
+	let client = clients.get(id);
+	if (!client) {
+		client = new RedisClient(config);
+		clients.set(id, client);
 	}
-	return state;
+	return client;
 }
 
 // ---------------------------------------------------------------------------
-// Configuracao do Redis do n8n (queue mode) — lida uma vez por processo
+// Configuracao: variaveis do n8n (QUEUE_BULL_REDIS_*) — lidas uma vez por processo
 // ---------------------------------------------------------------------------
 
 function env(name: string): string | undefined {
@@ -271,32 +247,38 @@ function env(name: string): string | undefined {
 	return undefined;
 }
 
-let queueRedisCache: { value: RedisConfig | undefined } | undefined;
+let configCache: { value?: RedisConfig; problem?: string } | undefined;
 
-/** Redis que o n8n usa em queue mode, ou undefined se o processo nao estiver em queue mode. */
-export function n8nQueueRedis(): RedisConfig | undefined {
-	if (queueRedisCache) return queueRedisCache.value;
-	let value: RedisConfig | undefined;
-	const queueMode = env('EXECUTIONS_MODE') === 'queue';
-	const host = env('QUEUE_BULL_REDIS_HOST');
-	// Redis Cluster nao e suportado → fila em memoria
-	if ((queueMode || host) && !env('QUEUE_BULL_REDIS_CLUSTER_NODES')) {
-		value = {
-			host: host ?? 'localhost',
-			port: Number(env('QUEUE_BULL_REDIS_PORT') ?? 6379),
-			username: env('QUEUE_BULL_REDIS_USERNAME'),
-			password: env('QUEUE_BULL_REDIS_PASSWORD'),
-			db: Number(env('QUEUE_BULL_REDIS_DB') ?? 0),
-			tls: env('QUEUE_BULL_REDIS_TLS') === 'true',
+/** Redis do n8n a partir das variaveis QUEUE_BULL_REDIS_*; `problem` explica por que nao ha config. */
+export function n8nRedisConfig(): { value?: RedisConfig; problem?: string } {
+	if (configCache) return configCache;
+	const host =
+		env('QUEUE_BULL_REDIS_HOST') ?? (env('EXECUTIONS_MODE') === 'queue' ? 'localhost' : undefined);
+	if (!host) {
+		configCache = {
+			problem:
+				'Redis not configured: set QUEUE_BULL_REDIS_HOST (and _PORT, _PASSWORD, _DB, _TLS if needed) in the n8n environment',
+		};
+	} else if (env('QUEUE_BULL_REDIS_CLUSTER_NODES')) {
+		configCache = { problem: 'Redis Cluster (QUEUE_BULL_REDIS_CLUSTER_NODES) is not supported' };
+	} else {
+		configCache = {
+			value: {
+				host,
+				port: Number(env('QUEUE_BULL_REDIS_PORT') ?? 6379),
+				username: env('QUEUE_BULL_REDIS_USERNAME'),
+				password: env('QUEUE_BULL_REDIS_PASSWORD'),
+				db: Number(env('QUEUE_BULL_REDIS_DB') ?? 0),
+				tls: env('QUEUE_BULL_REDIS_TLS') === 'true',
+			},
 		};
 	}
-	queueRedisCache = { value };
-	return value;
+	return configCache;
 }
 
 /** So para testes: esquece a configuracao lida do ambiente. */
-export function resetQueueRedisCache() {
-	queueRedisCache = undefined;
+export function resetRedisConfigCache() {
+	configCache = undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -309,57 +291,38 @@ export function limiterKey(apiKey: string): string {
 }
 
 /**
- * Reserva a vez desta chamada e devolve quantos ms esperar antes de envia-la.
- * Nunca lanca: se o Redis falhar, usa a fila em memoria (e avisa no log a cada queda e retorno).
+ * Reserva a vez desta chamada na fila do Redis e devolve quantos ms esperar antes de envia-la.
+ * Sem Redis (nao configurado, fora do ar ou sem resposta) devolve ok: false com o motivo.
  */
-export async function reserveSlot(
-	options: ReserveOptions,
-): Promise<{ waitMs: number; via: 'redis' | 'memory' }> {
+export async function reserveSlot(options: ReserveOptions): Promise<ReserveResult> {
 	const rps = options.requestsPerSecond > 0 ? options.requestsPerSecond : 1;
 	const intervalMs = Math.max(1, Math.round(1000 / rps));
-	const key = options.identity;
 
-	const redis =
-		options.mode === 'memory'
-			? undefined
-			: options.mode === 'redis'
-				? options.redis
-				: n8nQueueRedis();
+	const { value: redis, problem } = n8nRedisConfig();
+	if (!redis) return { ok: false, problem: problem ?? 'Redis not configured' };
 
-	if (redis) {
-		const state = stateFor(redis);
-		if (Date.now() >= state.retryAt) {
-			try {
-				const result = await state.client.command([
-					'EVAL',
-					RESERVE_SCRIPT,
-					'1',
-					key,
-					String(intervalMs),
-				]);
-				if (state.down) {
-					state.down = false;
-					options.log?.warn?.(
-						`Tess AI rate limit: Redis ${redis.host}:${redis.port} is back; coordination restored`,
-					);
-				} else if (!state.announced) {
-					options.log?.info?.(
-						`Tess AI rate limit: coordinated via Redis ${redis.host}:${redis.port} (${rps} req/s)`,
-					);
-				}
-				state.announced = true;
-				return { waitMs: Math.max(0, Number(result) || 0), via: 'redis' };
-			} catch (error) {
-				// evita pagar timeout de conexao a cada chamada enquanto este Redis estiver fora
-				state.retryAt = Date.now() + REDIS_RETRY_AFTER_MS;
-				if (!state.down) {
-					state.down = true;
-					options.log?.warn?.(
-						`Tess AI rate limit: Redis ${redis.host}:${redis.port} unavailable (${(error as Error).message}); using the in-process queue and retrying Redis every ${REDIS_RETRY_AFTER_MS / 1000}s`,
-					);
-				}
-			}
-		}
+	let result: RespValue;
+	try {
+		result = await clientFor(redis).command([
+			'EVAL',
+			RESERVE_SCRIPT,
+			'1',
+			options.identity,
+			String(intervalMs),
+		]);
+	} catch (error) {
+		// o detalhe tecnico (ex.: ECONNREFUSED) vai separado: o n8n troca mensagens com esses codigos por texto generico
+		return {
+			ok: false,
+			problem: `Redis ${redis.host}:${redis.port} unavailable`,
+			detail: (error as Error).message,
+		};
 	}
-	return { waitMs: reserveInMemory(key, intervalMs), via: 'memory' };
+	if (!announced) {
+		announced = true;
+		options.log?.info?.(
+			`Tess AI rate limit: queue on Redis ${redis.host}:${redis.port} (${rps} req/s per token)`,
+		);
+	}
+	return { ok: true, waitMs: Math.max(0, Number(result) || 0) };
 }
