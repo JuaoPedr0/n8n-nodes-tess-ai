@@ -29,7 +29,7 @@ export const memoryOperations: INodeProperties[] = [
 			{
 				name: 'Update',
 				value: 'update',
-				description: 'Change the content or the collection of a memory',
+				description: 'Replace the content of a memory and optionally move it to another collection',
 				action: 'Update a memory',
 			},
 		],
@@ -55,7 +55,18 @@ export const memoryFields: INodeProperties[] = [
 		required: true,
 		default: '',
 		description: 'Content to remember (up to 32,000 characters)',
-		displayOptions: showFor(['create', 'update']),
+		displayOptions: showFor(['create']),
+	},
+	{
+		displayName: 'Memory',
+		name: 'memory',
+		type: 'string',
+		typeOptions: { rows: 4 },
+		required: true,
+		default: '',
+		description:
+			'New content of the memory (up to 32,000 characters). The Tess API requires it even when only the collection changes.',
+		displayOptions: showFor(['update']),
 	},
 	{
 		displayName: 'Collection Name or ID',
@@ -65,7 +76,17 @@ export const memoryFields: INodeProperties[] = [
 		default: '',
 		description:
 			'Collection to store the memory in (empty = default collection). Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
-		displayOptions: showFor(['create', 'update']),
+		displayOptions: showFor(['create']),
+	},
+	{
+		displayName: 'Collection Name or ID',
+		name: 'collectionId',
+		type: 'options',
+		typeOptions: { loadOptionsMethod: 'getMemoryCollections' },
+		default: '',
+		description:
+			'Collection to move the memory to (empty = keep the current collection). Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+		displayOptions: showFor(['update']),
 	},
 	{
 		displayName: 'Return All',

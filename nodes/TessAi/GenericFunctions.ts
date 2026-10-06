@@ -1,4 +1,5 @@
 import type {
+	IBinaryData,
 	IDataObject,
 	IExecuteFunctions,
 	IHttpRequestMethods,
@@ -105,7 +106,7 @@ function friendlyError(this: TessContext, error: unknown): NodeApiError {
 async function waitTurn(this: TessContext, credentials: IDataObject): Promise<void> {
 	const mode = (credentials.rateLimitMode as CoordinationMode) || 'auto';
 	const { waitMs } = await reserveSlot({
-		identity: limiterKey(String(credentials.workspaceId ?? ''), String(credentials.apiKey ?? '')),
+		identity: limiterKey(String(credentials.apiKey ?? '')),
 		requestsPerSecond: Number(credentials.requestsPerSecond ?? 1) || 1,
 		mode,
 		redis:
@@ -119,7 +120,10 @@ async function waitTurn(this: TessContext, credentials: IDataObject): Promise<vo
 						tls: Boolean(credentials.redisTls),
 					}
 				: undefined,
-		warn: (message) => this.logger?.info(message),
+		log: {
+			info: (message) => this.logger?.info(message),
+			warn: (message) => this.logger?.warn(message),
+		},
 	});
 	if (waitMs > 0) await sleep(waitMs);
 }
@@ -211,27 +215,40 @@ function nextInterval(current: number, initial: number): number {
 	return Math.min(Math.max(15, initial), Math.max(current * 1.5, initial));
 }
 
+/**
+ * Prazo absoluto (ms) a partir de um timeout em segundos; 0 = sem limite (vale so o timeout de
+ * execucao do proprio n8n, se configurado). Um mesmo prazo e compartilhado por todas as etapas
+ * de uma operacao (anexos, execucao do agente, correcoes de JSON).
+ */
+export function deadlineFrom(timeoutSeconds: number): number {
+	return timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : Infinity;
+}
+
+interface WaitLimit {
+	deadline: number;
+	/** so para a mensagem de erro */
+	timeoutSeconds: number;
+}
+
 /** Aguarda uma execucao de agente chegar a um status final, consultando /agent-responses/{id}. */
 export async function waitForAgentResponse(
 	this: IExecuteFunctions,
 	response: IDataObject,
 	itemIndex: number,
-	{ timeoutSeconds, intervalSeconds }: { timeoutSeconds: number; intervalSeconds: number },
+	{ deadline, timeoutSeconds, intervalSeconds }: WaitLimit & { intervalSeconds: number },
 ): Promise<IDataObject> {
 	let current = response;
-	// timeout 0 = sem limite (vale so o timeout de execucao do proprio n8n, se configurado)
-	const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : Infinity;
 	let interval = intervalSeconds;
 
 	while (!TERMINAL_STATUSES.includes(String(current.status))) {
 		if (Date.now() >= deadline) {
 			throw new NodeOperationError(
 				this.getNode(),
-				`Agent execution ${current.id} did not finish within ${timeoutSeconds}s (status: ${current.status}). Check it later with "Agent Response → Get" or increase the timeout.`,
+				`Agent execution ${current.id} did not finish within the ${timeoutSeconds}s timeout (status: ${current.status}). Check it later with "Agent Response → Get" or increase the timeout.`,
 				{ itemIndex },
 			);
 		}
-		await sleep(interval * 1000);
+		await sleep(Math.min(interval * 1000, Math.max(0, deadline - Date.now())));
 		interval = nextInterval(interval, intervalSeconds);
 		current = (await tessApiRequest.call(
 			this,
@@ -247,38 +264,78 @@ export async function waitForAgentResponse(
 // Upload de arquivos (ate 32 MB direto; ate 200 MB pelo fluxo v2 com URL assinada)
 // ---------------------------------------------------------------------------
 
-const FILE_READY = ['completed', 'processed', 'success', 'succeeded'];
+const FILE_READY = ['completed', 'processed', 'success', 'succeeded', 'ready', 'done'];
 const FILE_FAILED = ['failed', 'error', 'canceled', 'cancelled'];
+const FILE_IN_PROGRESS = [
+	'waiting',
+	'pending',
+	'queued',
+	'processing',
+	'in_progress',
+	'in-progress',
+	'running',
+	'starting',
+];
 
+/**
+ * Espera o processamento do arquivo. So continua consultando enquanto o status for conhecido como
+ * "em andamento"; status desconhecido encerra a espera (com aviso) em vez de prender a execucao.
+ */
 export async function waitForFileProcessing(
 	this: IExecuteFunctions,
 	file: IDataObject,
 	itemIndex: number,
-	timeoutSeconds: number,
+	{ deadline, timeoutSeconds }: WaitLimit,
 ): Promise<IDataObject> {
 	let current = file;
-	const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : Infinity;
+	// a resposta do upload pode vir sem status: consulta o arquivo antes de decidir
+	if (current.status === undefined || current.status === null || current.status === '') {
+		current = (await tessApiRequest.call(this, 'GET', `/files/${current.id}`)) as IDataObject;
+	}
 	let interval = 3;
-	while (!FILE_READY.includes(String(current.status))) {
-		if (FILE_FAILED.includes(String(current.status))) {
+	while (true) {
+		const status = String(current.status ?? '').toLowerCase();
+		if (FILE_READY.includes(status)) return current;
+		if (FILE_FAILED.includes(status)) {
 			throw new NodeOperationError(
 				this.getNode(),
 				`Tess could not process file ${current.id} (${current.filename ?? ''}): status "${current.status}"`,
 				{ itemIndex },
 			);
 		}
+		if (!FILE_IN_PROGRESS.includes(status)) {
+			this.logger?.warn(
+				`Tess AI: file ${current.id} returned unknown status "${current.status}"; not waiting for processing`,
+			);
+			return current;
+		}
 		if (Date.now() >= deadline) {
 			throw new NodeOperationError(
 				this.getNode(),
-				`File ${current.id} was not processed within ${timeoutSeconds}s (status: ${current.status}). Check it later with "File → Get".`,
+				`File ${current.id} was not processed within the ${timeoutSeconds}s timeout (status: ${current.status}). Check it later with "File → Get".`,
 				{ itemIndex },
 			);
 		}
-		await sleep(interval * 1000);
+		await sleep(Math.min(interval * 1000, Math.max(0, deadline - Date.now())));
 		interval = nextInterval(interval, 3);
 		current = (await tessApiRequest.call(this, 'GET', `/files/${current.id}`)) as IDataObject;
 	}
-	return current;
+}
+
+/** Tamanho do binario sem carrega-lo (metadados do n8n), quando disponivel. */
+async function binarySize(this: IExecuteFunctions, meta: IBinaryData): Promise<number | undefined> {
+	if (typeof meta.bytes === 'number') return meta.bytes;
+	if (meta.id) {
+		try {
+			const info = await this.helpers.getBinaryMetadata(meta.id);
+			if (typeof info.fileSize === 'number') return info.fileSize;
+		} catch {
+			// sem metadados: confere depois de carregar
+		}
+		return undefined;
+	}
+	// binario em memoria (base64)
+	return meta.data ? Math.floor((meta.data.length * 3) / 4) : undefined;
 }
 
 export async function uploadBinary(
@@ -288,27 +345,38 @@ export async function uploadBinary(
 	{
 		process,
 		waitForProcessing,
+		deadline,
 		timeoutSeconds,
-	}: { process: boolean; waitForProcessing: boolean; timeoutSeconds: number },
+	}: { process: boolean; waitForProcessing: boolean } & WaitLimit,
 ): Promise<IDataObject> {
 	const meta = this.helpers.assertBinaryData(itemIndex, binaryPropertyName);
-	const buffer = await this.helpers.getBinaryDataBuffer(itemIndex, binaryPropertyName);
 	const fileName = meta.fileName || 'file';
 	const mimeType = meta.mimeType || 'application/octet-stream';
-	const size = buffer.length;
-
-	if (size > LARGE_UPLOAD_LIMIT) {
-		throw new NodeOperationError(
+	const tooLarge = (bytes: number) =>
+		new NodeOperationError(
 			this.getNode(),
-			`File "${fileName}" has ${(size / 1024 / 1024).toFixed(1)} MB — the Tess API accepts up to 200 MB`,
+			`File "${fileName}" has ${(bytes / 1024 / 1024).toFixed(1)} MB — the Tess API accepts up to 200 MB`,
 			{ itemIndex },
 		);
-	}
+
+	// confere o tamanho antes de carregar o arquivo na memoria
+	const knownSize = await binarySize.call(this, meta);
+	if (knownSize !== undefined && knownSize > LARGE_UPLOAD_LIMIT) throw tooLarge(knownSize);
+
+	const buffer = await this.helpers.getBinaryDataBuffer(itemIndex, binaryPropertyName);
+	const size = buffer.length;
+	if (size > LARGE_UPLOAD_LIMIT) throw tooLarge(size);
 
 	let file: IDataObject;
 	if (size <= SIMPLE_UPLOAD_LIMIT) {
 		const form = new FormData();
-		form.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), fileName);
+		// view sobre o mesmo buffer (sem copia extra)
+		const bytes = new Uint8Array(
+			buffer.buffer as ArrayBuffer,
+			buffer.byteOffset,
+			buffer.byteLength,
+		);
+		form.append('file', new Blob([bytes], { type: mimeType }), fileName);
 		form.append('process', process ? 'true' : 'false');
 		file = await tessApiRequest.call(this, 'POST', '/files', form);
 	} else {
@@ -351,7 +419,7 @@ export async function uploadBinary(
 	}
 
 	if (process && waitForProcessing) {
-		file = await waitForFileProcessing.call(this, file, itemIndex, timeoutSeconds);
+		file = await waitForFileProcessing.call(this, file, itemIndex, { deadline, timeoutSeconds });
 	}
 	return file;
 }

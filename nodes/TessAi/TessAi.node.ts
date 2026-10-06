@@ -38,6 +38,7 @@ import {
 	parseIdList,
 	tessApiRequest,
 	tessApiRequestAllItems,
+	deadlineFrom,
 	uploadBinary,
 	waitForAgentResponse,
 } from './GenericFunctions';
@@ -124,7 +125,8 @@ export class TessAi implements INodeType {
 			dark: 'file:../../icons/tess-ai-logo.dark.svg',
 		},
 		group: ['transform'],
-		version: [1],
+		version: [1, 1.1],
+		defaultVersion: 1.1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
 		description: 'Run Tess AI agents and manage files and memories',
 		defaults: { name: 'Tess AI' },
@@ -347,6 +349,9 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 		const inputs = (this.getNodeParameter('inputs.value', i, {}) as IDataObject | null) ?? {};
 		const wait = this.getNodeParameter('waitForCompletion', i, true) as boolean;
 		const options = this.getNodeParameter('options', i, {}) as IDataObject;
+		// um único prazo para a operação inteira: anexos + execução + correções de JSON (0 = sem limite)
+		const timeoutSeconds = (options.timeout as number) ?? 600;
+		const deadline = deadlineFrom(timeoutSeconds);
 
 		const body: IDataObject = {};
 		for (const [key, value] of Object.entries(inputs)) {
@@ -414,7 +419,8 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 			const file = await uploadBinary.call(this, i, field, {
 				process: true,
 				waitForProcessing: true,
-				timeoutSeconds: (options.timeout as number) ?? 600,
+				deadline,
+				timeoutSeconds,
 			});
 			uploadedFiles.push({
 				id: file.id,
@@ -442,7 +448,8 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 			if (!wait) return execution;
 
 			execution = await waitForAgentResponse.call(this, execution, i, {
-				timeoutSeconds: (options.timeout as number) ?? 600,
+				deadline,
+				timeoutSeconds,
 				intervalSeconds: (options.pollInterval as number) ?? 3,
 			});
 			if (execution.status !== 'succeeded') {
@@ -527,13 +534,17 @@ async function executeFile(this: IExecuteFunctions, operation: string, i: number
 	if (operation === 'upload') {
 		const binaryPropertyName = this.getNodeParameter('binaryPropertyName', i) as string;
 		const process = this.getNodeParameter('process', i, true) as boolean;
+		// v1 (workflows criados até a 0.2.x) não esperava o processamento: o padrão continua false nela
+		const waitDefault = this.getNode().typeVersion >= 1.1;
 		const waitForProcessing = process
-			? (this.getNodeParameter('waitForProcessing', i, true) as boolean)
+			? (this.getNodeParameter('waitForProcessing', i, waitDefault) as boolean)
 			: false;
+		const timeoutSeconds = this.getNodeParameter('processingTimeout', i, 600) as number;
 		return await uploadBinary.call(this, i, binaryPropertyName, {
 			process,
 			waitForProcessing,
-			timeoutSeconds: this.getNodeParameter('processingTimeout', i, 600) as number,
+			deadline: deadlineFrom(timeoutSeconds),
+			timeoutSeconds,
 		});
 	}
 	if (operation === 'get' || operation === 'process') {

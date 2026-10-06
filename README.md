@@ -24,15 +24,17 @@ O botão **Test** lista um agente para validar token e workspace.
 ## Limite de requisições (fila global)
 
 A Tess aceita cerca de **1 requisição por segundo por token** e responde `429` acima disso. O n8n não coordena
-limites de API entre workflows, então o node mantém uma **fila própria por credencial**: todas as chamadas — de
-todos os workflows e execuções — saem em ordem, no máximo *Requests per Second* por segundo.
+limites de API entre workflows, então o node mantém uma **fila própria por API Key** (credenciais com o mesmo
+token, mesmo em workspaces diferentes, dividem a mesma fila): todas as chamadas — de todos os workflows e
+execuções — saem em ordem, no máximo *Requests per Second* por segundo.
 
 - **n8n em um processo**: a fila fica na memória do processo.
 - **n8n em queue mode (main + workers)**: com *Rate Limit Coordination = Auto*, a fila é compartilhada pelo
   **Redis que o n8n já usa** (`QUEUE_BULL_REDIS_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_DB`, `_TLS`, inclusive
   as variantes `_FILE`) — sem configuração extra. Chave: `n8n-tess:rl:<hash>`. Redis Cluster não é suportado
   (cai para a memória). *Redis (Custom)* permite apontar outro Redis.
-- Se o Redis estiver fora, o node usa a fila em memória (e tenta o Redis de novo a cada 30 s), com aviso no log.
+- Se o Redis estiver fora ou não responder em 2 s, o node usa a fila em memória e tenta aquele Redis de novo a
+  cada 30 s; queda e retorno aparecem no log (warn). Um Redis com problema não afeta credenciais que usam outro.
 - Se mesmo assim vier `429`, o node espera o `retry_after` informado pela Tess e tenta de novo (até 3 vezes).
 - Enquanto espera um agente ou um arquivo, o intervalo de consulta cresce até 15 s para gastar menos da cota.
 
@@ -53,7 +55,12 @@ Erros comuns viram mensagens diretas: API Key inválida (401/403), Workspace ID 
 | **Memory Collection** | **Create**; **Update** (renomear); **Delete** (apaga também as memórias; a coleção padrão não pode ser apagada); **Get Many** |
 
 Upload: até 32 MB vai direto (`POST /files`); de 32 MB a 200 MB usa o fluxo v2 da Tess (URL assinada →
-envio direto ao storage → registro), automaticamente.
+envio direto ao storage → registro), automaticamente. O tamanho é conferido pelos metadados antes de carregar o
+arquivo. *Wait for Processing* acompanha o status até `completed`; se a Tess devolver um status desconhecido, o
+node para de esperar (com aviso no log) em vez de ficar preso.
+
+**Versões do node**: workflows criados até a 0.2.x usam o node v1, em que *Wait for Processing* começa
+desligado (mesmo comportamento de antes). Nodes novos são v1.1, com *Wait for Processing* ligado por padrão.
 
 ### Agent → Execute
 
@@ -65,7 +72,8 @@ envio direto ao storage → registro), automaticamente.
   resposta completa).
 - **Wait for Completion** (padrão: ligado): a Tess responde em até 100 s; se a execução continuar, o node consulta
   `/agent-responses/{id}` a cada *Poll Interval* até terminar ou atingir o *Timeout* (padrão 600 s;
-  **0 = sem limite**, vale só o timeout de execução do n8n, se houver).
+  **0 = sem limite**, vale só o timeout de execução do n8n, se houver). O *Timeout* é **um prazo único para a
+  operação inteira**: processamento dos anexos + execução do agente + correções de JSON.
   Desligado, devolve o ID da execução na hora — consulte depois com *Agent Response → Get*.
 - **Output Format → JSON** (a API da Tess não tem "modo JSON"; o node garante o formato):
   - **Schema Type** — igual ao *Structured Output Parser* do n8n:

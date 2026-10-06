@@ -49,6 +49,18 @@ export const fileFields: INodeProperties[] = [
 			'Whether to process the file right after upload so it can be used by agents (consumes credits)',
 		displayOptions: showFor(['upload']),
 	},
+	// v1 = nodes criados até a 0.2.x (não esperavam o processamento); v1.1+ espera por padrão
+	{
+		displayName: 'Wait for Processing',
+		name: 'waitForProcessing',
+		type: 'boolean',
+		default: false,
+		description:
+			'Whether to wait until Tess finishes processing the file (status "completed") before continuing',
+		displayOptions: {
+			show: { resource: ['file'], operation: ['upload'], process: [true], '@version': [1] },
+		},
+	},
 	{
 		displayName: 'Wait for Processing',
 		name: 'waitForProcessing',
@@ -56,7 +68,14 @@ export const fileFields: INodeProperties[] = [
 		default: true,
 		description:
 			'Whether to wait until Tess finishes processing the file (status "completed") before continuing',
-		displayOptions: { show: { resource: ['file'], operation: ['upload'], process: [true] } },
+		displayOptions: {
+			show: {
+				resource: ['file'],
+				operation: ['upload'],
+				process: [true],
+				'@version': [{ _cnd: { gte: 1.1 } }],
+			},
+		},
 	},
 	{
 		displayName: 'Processing Timeout (Seconds)',
