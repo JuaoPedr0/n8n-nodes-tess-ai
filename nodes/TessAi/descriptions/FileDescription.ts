@@ -10,6 +10,12 @@ export const fileOperations: INodeProperties[] = [
 		noDataExpression: true,
 		displayOptions: { show: { resource: ['file'] } },
 		options: [
+			{
+				name: 'Delete',
+				value: 'delete',
+				description: 'Delete a file from the workspace',
+				action: 'Delete a file',
+			},
 			{ name: 'Get', value: 'get', description: 'Get a file', action: 'Get a file' },
 			{ name: 'Get Many', value: 'getMany', description: 'List files', action: 'Get many files' },
 			{
@@ -18,6 +24,18 @@ export const fileOperations: INodeProperties[] = [
 				description:
 					'Extract the content of an uploaded file so agents can use it (consumes credits)',
 				action: 'Process a file',
+			},
+			{
+				name: 'Resolve Reference',
+				value: 'resolveReference',
+				description: 'Turn a durable doc:// file reference into a short-lived download URL',
+				action: 'Resolve a file reference',
+			},
+			{
+				name: 'Update Visibility',
+				value: 'updateVisibility',
+				description: 'Set who can see a file: only its owner, the workspace or anyone with the link',
+				action: 'Update the visibility of a file',
 			},
 			{
 				name: 'Upload',
@@ -100,7 +118,7 @@ export const fileFields: INodeProperties[] = [
 		required: true,
 		default: '',
 		placeholder: '73325',
-		displayOptions: showFor(['get', 'process']),
+		displayOptions: showFor(['delete', 'get', 'process', 'updateVisibility']),
 	},
 	{
 		displayName: 'Return All',
@@ -129,5 +147,71 @@ export const fileFields: INodeProperties[] = [
 			{ name: 'Oldest First', value: 'asc' },
 		],
 		displayOptions: showFor(['getMany']),
+	},
+
+	// ---------------- process ----------------
+	{
+		displayName: 'Processing Mode',
+		name: 'processMode',
+		type: 'options',
+		options: [
+			{
+				name: 'Wait (Sync)',
+				value: 'sync',
+				description: 'Tess holds the request until the file is processed (up to 5 minutes)',
+			},
+			{
+				name: 'Start Only (Async)',
+				value: 'async',
+				description: 'Start processing and return at once; follow it with "File → Get"',
+			},
+		],
+		default: 'sync',
+		displayOptions: showFor(['process']),
+	},
+
+	// ---------------- updateVisibility ----------------
+	{
+		displayName: 'Visibility',
+		name: 'visibility',
+		type: 'options',
+		required: true,
+		options: [
+			{ name: 'Private (Owner Only)', value: 'private' },
+			{ name: 'Public (Anyone With the Link)', value: 'public' },
+			{ name: 'Workspace', value: 'workspace' },
+		],
+		default: 'workspace',
+		displayOptions: showFor(['updateVisibility']),
+	},
+
+	// ---------------- resolveReference ----------------
+	{
+		displayName: 'Reference',
+		name: 'reference',
+		type: 'string',
+		required: true,
+		default: '',
+		placeholder: 'doc://file_4f2c1a9e-...',
+		description: 'Durable reference returned by Tess as "ref_url"',
+		displayOptions: showFor(['resolveReference']),
+	},
+	{
+		displayName: 'Options',
+		name: 'resolveOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: showFor(['resolveReference']),
+		options: [
+			{
+				displayName: 'Agent ID',
+				name: 'agent_id',
+				type: 'number',
+				default: 0,
+				description:
+					'Agent being executed, when known. Lets a public-embed session resolve a private file from that agent knowledge base.',
+			},
+		],
 	},
 ];

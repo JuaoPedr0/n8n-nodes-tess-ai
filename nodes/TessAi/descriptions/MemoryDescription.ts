@@ -21,10 +21,22 @@ export const memoryOperations: INodeProperties[] = [
 				action: 'Delete a memory',
 			},
 			{
+				name: 'Get Import Status',
+				value: 'getImportStatus',
+				description: 'Get the status and summary of a memory import',
+				action: 'Get the status of a memory import',
+			},
+			{
 				name: 'Get Many',
 				value: 'getMany',
 				description: 'List memories',
 				action: 'Get many memories',
+			},
+			{
+				name: 'Import From Text',
+				value: 'importFromText',
+				description: 'Let Tess extract memories from a free text',
+				action: 'Import memories from text',
 			},
 			{
 				name: 'Update',
@@ -126,6 +138,65 @@ export const memoryFields: INodeProperties[] = [
 	},
 ];
 
+// ---------------- importFromText / getImportStatus ----------------
+export const memoryImportFields: INodeProperties[] = [
+	{
+		displayName: 'Text',
+		name: 'importText',
+		type: 'string',
+		typeOptions: { rows: 6 },
+		required: true,
+		default: '',
+		description: 'Free text from which Tess extracts and stores memories',
+		displayOptions: showFor(['importFromText']),
+	},
+	{
+		displayName: 'Options',
+		name: 'importOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: showFor(['importFromText']),
+		options: [
+			{
+				displayName: 'Collection Name or ID',
+				name: 'collection_id',
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getMemoryCollections' },
+				default: '',
+				description:
+					'Collection that receives the memories. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+			},
+			{
+				displayName: 'Wait for Completion',
+				name: 'wait',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether Tess should hold the request until the import finishes (bounded timeout). Otherwise use "Get Import Status".',
+			},
+		],
+	},
+	{
+		displayName: 'Additional Body (JSON)',
+		name: 'extraBody',
+		type: 'json',
+		default: '',
+		description:
+			'Extra fields sent in the request body, as a JSON object. They override the fields above.',
+		displayOptions: showFor(['importFromText']),
+	},
+	{
+		displayName: 'Import ID',
+		name: 'importId',
+		type: 'string',
+		required: true,
+		default: '',
+		description: 'ID returned by "Import From Text"',
+		displayOptions: showFor(['getImportStatus']),
+	},
+];
+
 export const memoryCollectionOperations: INodeProperties[] = [
 	{
 		displayName: 'Operation',
@@ -145,6 +216,12 @@ export const memoryCollectionOperations: INodeProperties[] = [
 				value: 'delete',
 				description: 'Delete a memory collection and all its memories',
 				action: 'Delete a memory collection',
+			},
+			{
+				name: 'Get IDs',
+				value: 'getIds',
+				description: 'List the IDs of all accessible memory collections',
+				action: 'List memory collection identifiers',
 			},
 			{
 				name: 'Get Many',
@@ -217,7 +294,7 @@ export const memoryCollectionFields: INodeProperties[] = [
 		type: 'collection',
 		placeholder: 'Add Filter',
 		default: {},
-		displayOptions: showCollectionFor(['getMany']),
+		displayOptions: showCollectionFor(['getIds', 'getMany']),
 		options: [
 			{
 				displayName: 'Search',

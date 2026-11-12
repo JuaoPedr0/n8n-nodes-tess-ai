@@ -14,7 +14,33 @@ import type {
 } from 'n8n-workflow';
 import { jsonParse, NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
+import { accountHandlers } from './actions/account';
+import { agentSchedulerHandlers, agentVersionHandlers, webhookHandlers } from './actions/agentAdmin';
+import { artifactHandlers } from './actions/artifact';
+import type { HandlerMap } from './actions/common';
+import { itemsOf } from './actions/common';
+import {
+	digitalEmployeeHandlers,
+	digitalEmployeeRunHandlers,
+	digitalEmployeeTemplateHandlers,
+} from './actions/digitalEmployee';
+import { accountFields, accountOperations } from './descriptions/AccountDescription';
 import { agentFields, agentOperations } from './descriptions/AgentDescription';
+import {
+	agentSchedulerFields,
+	agentSchedulerOperations,
+} from './descriptions/AgentSchedulerDescription';
+import { agentVersionFields, agentVersionOperations } from './descriptions/AgentVersionDescription';
+import { artifactFields, artifactOperations } from './descriptions/ArtifactDescription';
+import {
+	digitalEmployeeFields,
+	digitalEmployeeOperations,
+	digitalEmployeeRunFields,
+	digitalEmployeeRunOperations,
+	digitalEmployeeTemplateFields,
+	digitalEmployeeTemplateOperations,
+} from './descriptions/DigitalEmployeeDescription';
+import { webhookFields, webhookOperations } from './descriptions/WebhookDescription';
 import {
 	agentResponseFields,
 	agentResponseOperations,
@@ -24,6 +50,7 @@ import {
 	memoryCollectionFields,
 	memoryCollectionOperations,
 	memoryFields,
+	memoryImportFields,
 	memoryOperations,
 } from './descriptions/MemoryDescription';
 import {
@@ -34,6 +61,12 @@ import {
 	validateSchema,
 } from './JsonOutput';
 import type { JsonSchema } from './JsonOutput';
+import { agentExtraHandlers, streamAgentExecution } from './actions/agent';
+import {
+	fileExtraHandlers,
+	memoryCollectionExtraHandlers,
+	memoryExtraHandlers,
+} from './actions/fileMemory';
 import { tessAiApiTest } from './CredentialTest';
 import {
 	AGENT_SUCCEEDED,
@@ -58,6 +91,18 @@ const RESERVED_INPUTS = [
 	'waitExecution',
 	'stream',
 ];
+
+// recursos novos: despacho por mapa (operation -> handler); os 5 originais seguem nas funcoes executeX
+const RESOURCE_HANDLERS: Record<string, HandlerMap> = {
+	account: accountHandlers,
+	agentScheduler: agentSchedulerHandlers,
+	agentVersion: agentVersionHandlers,
+	artifact: artifactHandlers,
+	digitalEmployee: digitalEmployeeHandlers,
+	digitalEmployeeRun: digitalEmployeeRunHandlers,
+	digitalEmployeeTemplate: digitalEmployeeTemplateHandlers,
+	webhook: webhookHandlers,
+};
 
 // quando o agente não define temperaturas permitidas
 const DEFAULT_TEMPERATURES = ['0', '0.25', '0.5', '0.75', '1'];
@@ -130,7 +175,8 @@ export class TessAi implements INodeType {
 		version: [1, 1.1],
 		defaultVersion: 1.1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
-		description: 'Run Tess AI agents and manage files and memories',
+		description:
+			'Run Tess AI agents and manage files, memories, schedulers, webhooks, artifacts and digital employees',
 		defaults: { name: 'Tess AI' },
 		inputs: [NodeConnectionTypes.Main],
 		outputs: [NodeConnectionTypes.Main],
@@ -143,11 +189,19 @@ export class TessAi implements INodeType {
 				type: 'options',
 				noDataExpression: true,
 				options: [
+					{ name: 'Account', value: 'account' },
 					{ name: 'Agent', value: 'agent' },
 					{ name: 'Agent Response', value: 'agentResponse' },
+					{ name: 'Agent Scheduler', value: 'agentScheduler' },
+					{ name: 'Agent Version', value: 'agentVersion' },
+					{ name: 'Artifact', value: 'artifact' },
+					{ name: 'Digital Employee', value: 'digitalEmployee' },
+					{ name: 'Digital Employee Run', value: 'digitalEmployeeRun' },
+					{ name: 'Digital Employee Template', value: 'digitalEmployeeTemplate' },
 					{ name: 'File', value: 'file' },
 					{ name: 'Memory', value: 'memory' },
 					{ name: 'Memory Collection', value: 'memoryCollection' },
+					{ name: 'Webhook', value: 'webhook' },
 				],
 				default: 'agent',
 			},
@@ -159,8 +213,25 @@ export class TessAi implements INodeType {
 			...fileFields,
 			...memoryOperations,
 			...memoryFields,
+			...memoryImportFields,
 			...memoryCollectionOperations,
 			...memoryCollectionFields,
+			...accountOperations,
+			...accountFields,
+			...agentSchedulerOperations,
+			...agentSchedulerFields,
+			...agentVersionOperations,
+			...agentVersionFields,
+			...artifactOperations,
+			...artifactFields,
+			...digitalEmployeeOperations,
+			...digitalEmployeeFields,
+			...digitalEmployeeRunOperations,
+			...digitalEmployeeRunFields,
+			...digitalEmployeeTemplateOperations,
+			...digitalEmployeeTemplateFields,
+			...webhookOperations,
+			...webhookFields,
 		],
 	};
 
@@ -189,6 +260,51 @@ export class TessAi implements INodeType {
 					paginationToken: page < lastPage ? String(page + 1) : undefined,
 				};
 			},
+
+			async searchDigitalEmployees(
+				this: ILoadOptionsFunctions,
+				filter?: string,
+				paginationToken?: string,
+			): Promise<INodeListSearchResult> {
+				const page = Number(paginationToken) || 1;
+				const response = (await tessApiRequest.call(this, 'GET', '/digital-employees', undefined, {
+					page,
+					per_page: 50,
+				})) as IDataObject;
+				const employees = itemsOf(response, ['employees', 'data.employees']);
+				const term = String(filter ?? '').toLowerCase();
+				const meta = (response.meta as IDataObject | undefined) ?? {};
+				const lastPage = Number(response.last_page ?? meta.last_page ?? page);
+				return {
+					results: employees
+						.filter((e) => !term || String(e.name ?? '').toLowerCase().includes(term))
+						.map((e) => ({ name: `${e.name ?? 'Employee'} (#${e.id})`, value: String(e.id) })),
+					paginationToken: page < lastPage ? String(page + 1) : undefined,
+				};
+			},
+
+			async searchArtifacts(
+				this: ILoadOptionsFunctions,
+				filter?: string,
+				paginationToken?: string,
+			): Promise<INodeListSearchResult> {
+				const response = (await tessApiRequest.call(this, 'GET', '/artifacts', undefined, {
+					per_page: 50,
+					...(paginationToken ? { cursor: paginationToken } : {}),
+				})) as IDataObject;
+				const artifacts = itemsOf(response);
+				const term = String(filter ?? '').toLowerCase();
+				const meta = (response.meta as IDataObject | undefined) ?? {};
+				return {
+					results: artifacts
+						.filter((a) => !term || String(a.title ?? '').toLowerCase().includes(term))
+						.map((a) => ({
+							name: String(a.title ?? a.universal_id),
+							value: String(a.universal_id ?? a.id),
+						})),
+					paginationToken: meta.has_more && meta.next_cursor ? String(meta.next_cursor) : undefined,
+				};
+			},
 		},
 
 		loadOptions: {
@@ -201,6 +317,15 @@ export class TessAi implements INodeType {
 				return collections.map((c) => ({
 					name: String(c.display_name || c.name || c.id),
 					value: c.id as number,
+				}));
+			},
+
+			async getArtifactTemplates(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+				const response = (await tessApiRequest.call(this, 'GET', '/artifact-templates')) as IDataObject;
+				return itemsOf(response, ['templates']).map((t) => ({
+					name: String(t.name ?? t.title ?? t.slug),
+					value: String(t.slug ?? t.id),
+					description: t.description ? String(t.description) : undefined,
 				}));
 			},
 
@@ -264,6 +389,14 @@ export class TessAi implements INodeType {
 					result = await executeMemory.call(this, operation, i);
 				} else if (resource === 'memoryCollection') {
 					result = await executeMemoryCollection.call(this, operation, i);
+				} else if (RESOURCE_HANDLERS[resource]) {
+					const handler = RESOURCE_HANDLERS[resource][operation];
+					if (!handler) {
+						throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, {
+							itemIndex: i,
+						});
+					}
+					result = await handler.call(this, i);
 				} else {
 					throw new NodeOperationError(this.getNode(), `Unknown resource: ${resource}`, {
 						itemIndex: i,
@@ -334,6 +467,7 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 		const filters = this.getNodeParameter('filters', i, {}) as IDataObject;
 		return await getMany.call(this, i, '/agents', 'data', filters);
 	}
+	if (agentExtraHandlers[operation]) return await agentExtraHandlers[operation].call(this, i);
 
 	const agentId = this.getNodeParameter('agent', i, '', { extractValue: true }) as string;
 	if (!/^[0-9]+$/.test(String(agentId))) {
@@ -447,7 +581,19 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 		if (collections.length) body.memory_collections = collections;
 		body.waitExecution = wait;
 
+		const useStream = wait && options.stream === true;
 		const runOnce = async (requestBody: IDataObject): Promise<IDataObject> => {
+			if (useStream) {
+				const streamed = await streamAgentExecution.call(this, agentId, requestBody, i, deadline);
+				if (!AGENT_SUCCEEDED.includes(String(streamed.status ?? '').toLowerCase())) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Agent execution ${streamed.id} ended with status "${streamed.status}"`,
+						{ itemIndex: i, description: String(streamed.output ?? '') },
+					);
+				}
+				return streamed;
+			}
 			const response = (await tessApiRequest.call(
 				this,
 				'POST',
@@ -542,6 +688,7 @@ async function executeAgentResponse(this: IExecuteFunctions, operation: string, 
 }
 
 async function executeFile(this: IExecuteFunctions, operation: string, i: number) {
+	if (fileExtraHandlers[operation]) return await fileExtraHandlers[operation].call(this, i);
 	if (operation === 'upload') {
 		const binaryPropertyName = this.getNodeParameter('binaryPropertyName', i) as string;
 		const process = this.getNodeParameter('process', i, true) as boolean;
@@ -562,7 +709,9 @@ async function executeFile(this: IExecuteFunctions, operation: string, i: number
 		const fileId = encodeURIComponent(String(this.getNodeParameter('fileId', i)).trim());
 		return operation === 'get'
 			? ((await tessApiRequest.call(this, 'GET', `/files/${fileId}`)) as IDataObject)
-			: ((await tessApiRequest.call(this, 'POST', `/files/${fileId}/process`)) as IDataObject);
+			: ((await tessApiRequest.call(this, 'POST', `/files/${fileId}/process`, undefined, {
+					mode: this.getNodeParameter('processMode', i, 'sync') as string,
+				})) as IDataObject);
 	}
 	if (operation === 'getMany') {
 		const order = this.getNodeParameter('order', i, 'desc') as string;
@@ -572,6 +721,7 @@ async function executeFile(this: IExecuteFunctions, operation: string, i: number
 }
 
 async function executeMemory(this: IExecuteFunctions, operation: string, i: number) {
+	if (memoryExtraHandlers[operation]) return await memoryExtraHandlers[operation].call(this, i);
 	const collectionBody = (body: IDataObject) => {
 		const collectionId = this.getNodeParameter('collectionId', i, '') as string | number;
 		if (collectionId !== '' && collectionId !== null) body.collection_id = Number(collectionId);
@@ -602,6 +752,9 @@ async function executeMemory(this: IExecuteFunctions, operation: string, i: numb
 }
 
 async function executeMemoryCollection(this: IExecuteFunctions, operation: string, i: number) {
+	if (memoryCollectionExtraHandlers[operation]) {
+		return await memoryCollectionExtraHandlers[operation].call(this, i);
+	}
 	const collectionId = () =>
 		encodeURIComponent(String(this.getNodeParameter('collectionId', i)).trim());
 

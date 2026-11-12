@@ -164,6 +164,8 @@ export async function tessApiRequest(
 	endpoint: string,
 	body?: IDataObject | FormData,
 	qs?: IDataObject,
+	/** opcoes HTTP extras (ex.: resposta em texto para SSE); sobrescrevem as padrao */
+	extra: Partial<IHttpRequestOptions> = {},
 ): Promise<IDataObject> {
 	const credentials = await this.getCredentials('tessAiApi');
 	const baseUrl = String(credentials.baseUrl || 'https://api.tess.im').replace(/\/+$/, '');
@@ -176,6 +178,9 @@ export async function tessApiRequest(
 		json: true,
 	};
 	if (body !== undefined) options.body = body;
+	Object.assign(options, extra, {
+		headers: { ...options.headers, ...(extra.headers ?? {}) },
+	});
 
 	for (let attempt = 0; ; attempt++) {
 		await waitTurn.call(this, credentials);
@@ -241,7 +246,7 @@ export async function tessApiRequestAllItems(
 // ---------------------------------------------------------------------------
 
 /** Intervalo crescente: comeca no informado e vai ate 15 s, para gastar menos da cota da API. */
-function nextInterval(current: number, initial: number): number {
+export function nextInterval(current: number, initial: number): number {
 	return Math.min(Math.max(15, initial), Math.max(current * 1.5, initial));
 }
 

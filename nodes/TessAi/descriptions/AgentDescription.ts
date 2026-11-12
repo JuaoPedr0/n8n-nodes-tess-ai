@@ -1,5 +1,7 @@
 import type { INodeProperties } from 'n8n-workflow';
 
+import { extraBodyField } from './common';
+
 const showFor = (operation: string[]) => ({ show: { resource: ['agent'], operation } });
 
 export const agentOperations: INodeProperties[] = [
@@ -10,6 +12,12 @@ export const agentOperations: INodeProperties[] = [
 		noDataExpression: true,
 		displayOptions: { show: { resource: ['agent'] } },
 		options: [
+			{
+				name: 'Chat Completion (OpenAI Compatible)',
+				value: 'chatCompletion',
+				description: 'Send chat messages to a chat agent in the OpenAI Chat Completions format',
+				action: 'Chat with an agent openai compatible',
+			},
 			{
 				name: 'Execute',
 				value: 'execute',
@@ -33,6 +41,18 @@ export const agentOperations: INodeProperties[] = [
 				value: 'linkFiles',
 				description: 'Link uploaded files to an agent as knowledge',
 				action: 'Link files to an agent',
+			},
+			{
+				name: 'List Files',
+				value: 'listFiles',
+				description: 'List the files linked to an agent',
+				action: 'List the files of an agent',
+			},
+			{
+				name: 'Unlink File',
+				value: 'unlinkFile',
+				description: 'Remove the link between a file and an agent',
+				action: 'Unlink a file from an agent',
 			},
 		],
 		default: 'execute',
@@ -76,7 +96,17 @@ const agentLocator: INodeProperties = {
 };
 
 export const agentFields: INodeProperties[] = [
-	{ ...agentLocator, displayOptions: showFor(['execute', 'get', 'linkFiles']) },
+	{
+		...agentLocator,
+		displayOptions: showFor([
+			'chatCompletion',
+			'execute',
+			'get',
+			'linkFiles',
+			'listFiles',
+			'unlinkFile',
+		]),
+	},
 
 	// ---------------- execute ----------------
 	{
@@ -342,6 +372,14 @@ export const agentFields: INodeProperties[] = [
 					'Same as "Previous Messages", but as a JSON array — useful with an expression that returns the history from a previous node. Format: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}].',
 			},
 			{
+				displayName: 'Stream Response',
+				name: 'stream',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to receive the answer as a stream (chat agents only) instead of polling the execution status. Uses a single API call, which saves the Tess rate limit. Requires "Wait for Completion".',
+			},
+			{
 				// eslint-disable-next-line n8n-nodes-base/node-param-display-name-wrong-for-dynamic-options
 				displayName: 'Temperature',
 				name: 'temperature',
@@ -434,4 +472,101 @@ export const agentFields: INodeProperties[] = [
 		description: 'Comma-separated IDs of uploaded files to link to the agent',
 		displayOptions: showFor(['linkFiles']),
 	},
+
+	// ---------------- unlinkFile ----------------
+	{
+		displayName: 'File ID',
+		name: 'fileId',
+		type: 'string',
+		required: true,
+		default: '',
+		placeholder: '73325',
+		description: 'ID of the file to unlink from the agent (the file itself is not deleted)',
+		displayOptions: showFor(['unlinkFile']),
+	},
+
+	// ---------------- chatCompletion ----------------
+	{
+		displayName: 'Messages',
+		name: 'chatMessages',
+		type: 'fixedCollection',
+		typeOptions: { multipleValues: true, sortable: true },
+		placeholder: 'Add Message',
+		required: true,
+		default: { messages: [{ role: 'user', content: '' }] },
+		description: 'Conversation sent to the agent, in order. Use "System" for instructions.',
+		displayOptions: showFor(['chatCompletion']),
+		options: [
+			{
+				displayName: 'Message',
+				name: 'messages',
+				values: [
+					{
+						displayName: 'Role',
+						name: 'role',
+						type: 'options',
+						options: [
+							{ name: 'Assistant', value: 'assistant' },
+							{ name: 'System', value: 'system' },
+							{ name: 'User', value: 'user' },
+						],
+						default: 'user',
+					},
+					{
+						displayName: 'Content',
+						name: 'content',
+						type: 'string',
+						typeOptions: { rows: 3 },
+						default: '',
+					},
+				],
+			},
+		],
+	},
+	{
+		displayName: 'Simplify',
+		name: 'simplify',
+		type: 'boolean',
+		default: true,
+		description:
+			'Whether to return only the answer text, finish reason and usage instead of the full OpenAI-style response',
+		displayOptions: showFor(['chatCompletion']),
+	},
+	{
+		displayName: 'Options',
+		name: 'chatOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: showFor(['chatCompletion']),
+		options: [
+			{
+				displayName: 'Model Name or ID',
+				name: 'model',
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getAgentModels', loadOptionsDependsOn: ['agent.value'] },
+				default: '',
+				description:
+					'Model slug allowed by the selected agent. Empty uses the agent default. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+			},
+			{
+				displayName: 'Temperature',
+				name: 'temperature',
+				type: 'number',
+				typeOptions: { minValue: 0, maxValue: 2, numberPrecision: 2 },
+				default: 1,
+				description: 'Lower is more objective, higher is more creative (0 to 2)',
+			},
+			{
+				displayName: 'Tool Name or ID',
+				name: 'tools',
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getAgentTools', loadOptionsDependsOn: ['agent.value'] },
+				default: '',
+				description:
+					'Tool the agent may use. Empty uses the agent default. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+			},
+		],
+	},
+	extraBodyField(showFor(['chatCompletion'])),
 ];
