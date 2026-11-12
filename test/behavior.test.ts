@@ -152,6 +152,45 @@ describe('Digital Employee → Invoke', () => {
 	});
 });
 
+describe('erros da Tess e da rede', () => {
+	const audit = { resource: 'account', operation: 'getAuditEvents', from: '2026-11-01', to: '2026-11-02', filters: {}, returnAll: false, limit: 50 };
+
+	it('403 de permissao mostra a mensagem da Tess, nao "API Key invalida"', async () => {
+		const forbidden = Object.assign(new Error('Request failed with status code 403'), {
+			httpCode: '403',
+			response: { status: 403, data: { message: 'You do not have permission to access this feature.', type: 'error', status: 403 } },
+		});
+		await expect(
+			run(audit, () => {
+				throw forbidden;
+			}),
+		).rejects.toThrow(/No permission for this Tess feature: You do not have permission/);
+	});
+
+	it('GET com conexao cortada (socket hang up) tenta de novo', async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true, advanceTimeDelta: 1000 });
+		let calls = 0;
+		const { items } = await run(audit, () => {
+			if (++calls === 1) throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+			return { data: [{ id: 'e1' }], meta: { has_more: false } };
+		});
+		vi.useRealTimers();
+		expect(calls).toBe(2);
+		expect(items.map((i) => i.id)).toEqual(['e1']);
+	});
+
+	it('POST com conexao cortada nao repete (poderia duplicar a acao)', async () => {
+		let calls = 0;
+		await expect(
+			run({ resource: 'agent', operation: 'execute', agent: '10', message: 'oi', inputs: { value: {} }, waitForCompletion: false, outputFormat: 'text', options: {} }, () => {
+				calls++;
+				throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+			}),
+		).rejects.toThrow();
+		expect(calls).toBe(1);
+	});
+});
+
 describe('Redis da credencial', () => {
 	it('exige host e valida a porta', () => {
 		expect(redisConfigFromCredentials({}).problem).toMatch(/Redis Host/);

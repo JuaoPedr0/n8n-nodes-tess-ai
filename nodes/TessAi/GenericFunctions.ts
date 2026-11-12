@@ -18,6 +18,17 @@ const AGENT_IN_PROGRESS = ['starting', 'running', 'queued', 'pending', 'waiting'
 /** Status de execucao de agente que significam sucesso (o stream usa "completed"). */
 export const AGENT_SUCCEEDED = ['succeeded', 'completed'];
 const MAX_RATE_LIMIT_RETRIES = 3;
+const MAX_CONNECTION_RETRIES = 2;
+const CONNECTION_DROP_CODES = ['ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN'];
+
+/** A conexao caiu sem resposta HTTP (proxy/firewall cortou, "socket hang up")? */
+function isConnectionDrop(error: unknown, httpCode: string): boolean {
+	if (CONNECTION_DROP_CODES.includes(httpCode)) return true;
+	const raw = [dig(error, ['code']), dig(error, ['cause', 'code']), dig(error, ['message'])]
+		.filter((v) => v !== undefined)
+		.join(' ');
+	return CONNECTION_DROP_CODES.some((c) => raw.includes(c)) || /socket hang up/i.test(raw);
+}
 const SIMPLE_UPLOAD_LIMIT = 32 * 1024 * 1024;
 const LARGE_UPLOAD_LIMIT = 200 * 1024 * 1024;
 
@@ -81,6 +92,14 @@ function friendlyError(this: TessContext, error: unknown): NodeApiError {
 	if (code === '401' || code === '403') {
 		if (/default collection/i.test(text))
 			return remap('The default memory collection cannot be deleted');
+		// 403 de permissao do recurso (ex.: auditoria exige admin) nao e credencial errada
+		const permission = String(dig(errorBody(error), ['message']) ?? '');
+		if (code === '403' && /permission|not allowed|forbidden to access|feature/i.test(permission)) {
+			return remap(
+				`No permission for this Tess feature: ${permission}`,
+				'The credential works, but the user that owns this API Key lacks access to this resource in the workspace (some features, like audit events, need an admin role or a plan that includes them).',
+			);
+		}
 		return remap(
 			'Invalid API Key or no access to this workspace',
 			'Check the API Key and the Workspace ID in the "Tess AI API" credential.',
@@ -191,6 +210,15 @@ export async function tessApiRequest(
 			failure = error;
 		}
 		const code = String(new NodeApiError(this.getNode(), failure as JsonObject).httpCode ?? '');
+		// conexao cortada (proxy/rede) antes de qualquer resposta: repete so leituras, que sao seguras
+		if (method === 'GET' && isConnectionDrop(failure, code) && attempt < MAX_CONNECTION_RETRIES) {
+			const seconds = 2 ** attempt;
+			this.logger?.warn(
+				`Tess AI: connection dropped (${code || 'socket'}) on GET ${endpoint}; retrying in ${seconds}s`,
+			);
+			await sleep(seconds * 1000);
+			continue;
+		}
 		if (code === '429' && attempt < MAX_RATE_LIMIT_RETRIES) {
 			const seconds = retryAfterSeconds(failure);
 			this.logger?.warn(
