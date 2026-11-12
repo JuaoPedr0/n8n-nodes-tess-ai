@@ -34,7 +34,9 @@ import {
 	validateSchema,
 } from './JsonOutput';
 import type { JsonSchema } from './JsonOutput';
+import { tessAiApiTest } from './CredentialTest';
 import {
+	AGENT_SUCCEEDED,
 	parseIdList,
 	tessApiRequest,
 	tessApiRequestAllItems,
@@ -133,7 +135,7 @@ export class TessAi implements INodeType {
 		inputs: [NodeConnectionTypes.Main],
 		outputs: [NodeConnectionTypes.Main],
 		usableAsTool: true,
-		credentials: [{ name: 'tessAiApi', required: true }],
+		credentials: [{ name: 'tessAiApi', required: true, testedBy: 'tessAiApiTest' }],
 		properties: [
 			{
 				displayName: 'Resource',
@@ -163,6 +165,8 @@ export class TessAi implements INodeType {
 	};
 
 	methods = {
+		credentialTest: { tessAiApiTest },
+
 		listSearch: {
 			async searchAgents(
 				this: ILoadOptionsFunctions,
@@ -273,7 +277,14 @@ export class TessAi implements INodeType {
 				returnData.push(...executionData);
 			} catch (error) {
 				if (this.continueOnFail()) {
-					returnData.push({ json: { error: (error as Error).message }, pairedItem: { item: i } });
+					const description = (error as { description?: unknown }).description;
+					returnData.push({
+						json: {
+							error: (error as Error).message,
+							...(description ? { description: String(description) } : {}),
+						},
+						pairedItem: { item: i },
+					});
 					continue;
 				}
 				// re-embrulhar um NodeApiError/NodeOperationError devolve o proprio erro; so marcamos o item
@@ -452,7 +463,7 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 				timeoutSeconds,
 				intervalSeconds: (options.pollInterval as number) ?? 3,
 			});
-			if (execution.status !== 'succeeded') {
+			if (!AGENT_SUCCEEDED.includes(String(execution.status ?? '').toLowerCase())) {
 				throw new NodeOperationError(
 					this.getNode(),
 					`Agent execution ${execution.id} ended with status "${execution.status}"`,

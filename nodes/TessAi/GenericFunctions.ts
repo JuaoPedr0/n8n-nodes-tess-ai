@@ -9,11 +9,14 @@ import type {
 } from 'n8n-workflow';
 import { NodeApiError, NodeOperationError, sleep } from 'n8n-workflow';
 
-import { limiterKey, reserveSlot } from './RateLimiter';
+import { limiterKey, redisConfigFromCredentials, reserveSlot } from './RateLimiter';
 
 type TessContext = IExecuteFunctions | ILoadOptionsFunctions;
 
-const TERMINAL_STATUSES = ['succeeded', 'failed', 'error', 'canceled', 'cancelled'];
+/** Status de execucao de agente que significam "ainda rodando"; qualquer outro encerra a espera. */
+const AGENT_IN_PROGRESS = ['starting', 'running', 'queued', 'pending', 'waiting', 'processing', 'in_progress'];
+/** Status de execucao de agente que significam sucesso (o stream usa "completed"). */
+export const AGENT_SUCCEEDED = ['succeeded', 'completed'];
 const MAX_RATE_LIMIT_RETRIES = 3;
 const SIMPLE_UPLOAD_LIMIT = 32 * 1024 * 1024;
 const LARGE_UPLOAD_LIMIT = 200 * 1024 * 1024;
@@ -121,9 +124,21 @@ function friendlyError(this: TessContext, error: unknown): NodeApiError {
 
 const WORKFLOW_TOOL_CODES = ['WORKFLOW_TOOL_AUTHENTICATION_FAILED'];
 
-/** Espera a vez desta chamada na fila do token (Redis do n8n). Sem Redis, falha. */
+const QUEUE_HELP =
+	'Every Tess AI call goes through a shared queue in the Redis set in the "Tess AI API" credential, so all workflows and workers respect the Tess limit together. Check the Redis fields in the credential (use the Test button) and that Redis is running and reachable from this n8n process.';
+
+/** Espera a vez desta chamada na fila do token (Redis da credencial). Sem Redis, falha. */
 async function waitTurn(this: TessContext, credentials: IDataObject): Promise<void> {
+	const { value: redis, problem } = redisConfigFromCredentials(credentials);
+	if (!redis) {
+		throw new NodeOperationError(
+			this.getNode(),
+			`Tess AI rate limit queue unavailable: ${problem ?? 'Redis not configured'}`,
+			{ description: QUEUE_HELP },
+		);
+	}
 	const slot = await reserveSlot({
+		redis,
 		identity: limiterKey(String(credentials.apiKey ?? '')),
 		requestsPerSecond: Number(credentials.requestsPerSecond ?? 1) || 1,
 		log: { info: (message) => this.logger?.info(message) },
@@ -133,10 +148,7 @@ async function waitTurn(this: TessContext, credentials: IDataObject): Promise<vo
 			this.getNode(),
 			`Tess AI rate limit queue unavailable: ${slot.problem}`,
 			{
-				description: [
-					slot.detail ? `Detail: ${slot.detail}.` : '',
-					'Every Tess AI call goes through a shared queue in the n8n Redis (QUEUE_BULL_REDIS_* variables) so all workflows and workers respect the Tess limit together. Check that Redis is running and reachable from this n8n process.',
-				]
+				description: [slot.detail ? `Detail: ${slot.detail}.` : '', QUEUE_HELP]
 					.filter(Boolean)
 					.join(' '),
 			},
@@ -258,7 +270,7 @@ export async function waitForAgentResponse(
 	let current = response;
 	let interval = intervalSeconds;
 
-	while (!TERMINAL_STATUSES.includes(String(current.status))) {
+	while (AGENT_IN_PROGRESS.includes(String(current.status ?? '').toLowerCase())) {
 		if (Date.now() >= deadline) {
 			throw new NodeOperationError(
 				this.getNode(),
@@ -275,6 +287,12 @@ export async function waitForAgentResponse(
 		)) as IDataObject;
 	}
 
+	const status = String(current.status ?? '').toLowerCase();
+	if (!AGENT_SUCCEEDED.includes(status) && !['failed', 'error', 'canceled', 'cancelled'].includes(status)) {
+		this.logger?.warn(
+			`Tess AI: agent execution ${current.id} returned unknown status "${current.status}"; not waiting any longer`,
+		);
+	}
 	return current;
 }
 

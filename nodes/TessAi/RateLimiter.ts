@@ -1,8 +1,8 @@
 // Fila global de chamadas a API da Tess (limite padrao: 1 requisicao/segundo por token).
 //
-// O n8n nao coordena limites de API entre workflows nem entre workers. A fila fica sempre no Redis da
-// infraestrutura do n8n — o mesmo das variaveis QUEUE_BULL_REDIS_* —, entao todas as execucoes de todos
-// os workers (e o n8n local de desenvolvimento, apontado para o mesmo Redis) formam uma fila unica.
+// O n8n nao coordena limites de API entre workflows nem entre workers. A fila fica num Redis informado
+// na credencial "Tess AI API" (em producao, normalmente o mesmo Redis do n8n em queue mode), entao todas
+// as execucoes de todos os workers que usam a mesma API Key formam uma fila unica.
 // Cliente RESP minimo, sem dependencias de runtime.
 //
 // Algoritmo: cada chamada "reserva um horario" — o proximo slot livre do token — e espera ate ele.
@@ -12,7 +12,6 @@
 // sem passar pela fila.
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { connect as netConnect, type Socket } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
 
@@ -31,6 +30,8 @@ export interface LimiterLog {
 }
 
 export interface ReserveOptions {
+	/** Redis da fila (ver redisConfigFromCredentials) */
+	redis: RedisConfig;
 	/** chave da fila (ver limiterKey) */
 	identity: string;
 	requestsPerSecond: number;
@@ -108,6 +109,10 @@ class RedisClient {
 	async command(args: string[]): Promise<RespValue> {
 		await this.connect();
 		return await this.send(args);
+	}
+
+	close() {
+		this.reset(new Error('connection closed by client'));
 	}
 
 	private connect(): Promise<void> {
@@ -217,10 +222,19 @@ return slot - now
 `;
 
 const clients = new Map<string, RedisClient>();
-let announced = false;
+const announced = new Set<string>();
+
+function clientId(config: RedisConfig): string {
+	// a senha entra (como hash) para que trocar a senha na credencial abra uma conexao nova
+	const secret = createHash('sha256')
+		.update(config.password ?? '')
+		.digest('hex')
+		.slice(0, 12);
+	return `${config.tls ? 'tls' : 'tcp'}://${config.username ?? ''}:${secret}@${config.host}:${config.port}/${config.db ?? 0}`;
+}
 
 function clientFor(config: RedisConfig): RedisClient {
-	const id = `${config.tls ? 'tls' : 'tcp'}://${config.username ?? ''}@${config.host}:${config.port}/${config.db ?? 0}`;
+	const id = clientId(config);
 	let client = clients.get(id);
 	if (!client) {
 		client = new RedisClient(config);
@@ -230,55 +244,45 @@ function clientFor(config: RedisConfig): RedisClient {
 }
 
 // ---------------------------------------------------------------------------
-// Configuracao: variaveis do n8n (QUEUE_BULL_REDIS_*) — lidas uma vez por processo
+// Configuracao: campos Redis da credencial "Tess AI API"
 // ---------------------------------------------------------------------------
 
-function env(name: string): string | undefined {
-	const value = process.env[name];
-	if (value !== undefined && value !== '') return value;
-	const file = process.env[`${name}_FILE`];
-	if (file) {
-		try {
-			return readFileSync(file, 'utf8').trim();
-		} catch {
-			return undefined;
-		}
-	}
-	return undefined;
+/** Campos da credencial usados aqui (nomes iguais aos de TessAiApi.credentials.ts). */
+export interface RedisCredentialFields {
+	redisHost?: unknown;
+	redisPort?: unknown;
+	redisUsername?: unknown;
+	redisPassword?: unknown;
+	redisDatabase?: unknown;
+	redisTls?: unknown;
 }
 
-let configCache: { value?: RedisConfig; problem?: string } | undefined;
-
-/** Redis do n8n a partir das variaveis QUEUE_BULL_REDIS_*; `problem` explica por que nao ha config. */
-export function n8nRedisConfig(): { value?: RedisConfig; problem?: string } {
-	if (configCache) return configCache;
-	const host =
-		env('QUEUE_BULL_REDIS_HOST') ?? (env('EXECUTIONS_MODE') === 'queue' ? 'localhost' : undefined);
+/** Redis da fila a partir da credencial; `problem` explica o que falta preencher. */
+export function redisConfigFromCredentials(credentials: RedisCredentialFields): {
+	value?: RedisConfig;
+	problem?: string;
+} {
+	const host = String(credentials.redisHost ?? '').trim();
 	if (!host) {
-		configCache = {
-			problem:
-				'Redis not configured: set QUEUE_BULL_REDIS_HOST (and _PORT, _PASSWORD, _DB, _TLS if needed) in the n8n environment',
-		};
-	} else if (env('QUEUE_BULL_REDIS_CLUSTER_NODES')) {
-		configCache = { problem: 'Redis Cluster (QUEUE_BULL_REDIS_CLUSTER_NODES) is not supported' };
-	} else {
-		configCache = {
-			value: {
-				host,
-				port: Number(env('QUEUE_BULL_REDIS_PORT') ?? 6379),
-				username: env('QUEUE_BULL_REDIS_USERNAME'),
-				password: env('QUEUE_BULL_REDIS_PASSWORD'),
-				db: Number(env('QUEUE_BULL_REDIS_DB') ?? 0),
-				tls: env('QUEUE_BULL_REDIS_TLS') === 'true',
-			},
-		};
+		return { problem: 'Redis Host is empty in the "Tess AI API" credential' };
 	}
-	return configCache;
-}
-
-/** So para testes: esquece a configuracao lida do ambiente. */
-export function resetRedisConfigCache() {
-	configCache = undefined;
+	const port = Number(credentials.redisPort ?? 6379);
+	if (!Number.isInteger(port) || port < 1 || port > 65535) {
+		return { problem: `Redis Port "${String(credentials.redisPort)}" is not a valid port` };
+	}
+	const db = Number(credentials.redisDatabase ?? 0);
+	const username = String(credentials.redisUsername ?? '').trim();
+	const password = String(credentials.redisPassword ?? '');
+	return {
+		value: {
+			host,
+			port,
+			username: username || undefined,
+			password: password || undefined,
+			db: Number.isInteger(db) && db > 0 ? db : 0,
+			tls: credentials.redisTls === true,
+		},
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -298,8 +302,7 @@ export async function reserveSlot(options: ReserveOptions): Promise<ReserveResul
 	const rps = options.requestsPerSecond > 0 ? options.requestsPerSecond : 1;
 	const intervalMs = Math.max(1, Math.round(1000 / rps));
 
-	const { value: redis, problem } = n8nRedisConfig();
-	if (!redis) return { ok: false, problem: problem ?? 'Redis not configured' };
+	const { redis } = options;
 
 	let result: RespValue;
 	try {
@@ -318,11 +321,49 @@ export async function reserveSlot(options: ReserveOptions): Promise<ReserveResul
 			detail: (error as Error).message,
 		};
 	}
-	if (!announced) {
-		announced = true;
+	const id = `${clientId(redis)}|${options.identity}`;
+	if (!announced.has(id)) {
+		announced.add(id);
 		options.log?.info?.(
 			`Tess AI rate limit: queue on Redis ${redis.host}:${redis.port} (${rps} req/s per token)`,
 		);
 	}
 	return { ok: true, waitMs: Math.max(0, Number(result) || 0) };
+}
+
+/**
+ * Teste da credencial: conecta (AUTH/SELECT), faz PING e roda o script da fila numa chave de teste,
+ * o que confirma que o servidor aceita Lua (EVAL) e TIME. Usa uma conexao propria, fechada no fim.
+ */
+export async function testRedis(config: RedisConfig): Promise<{ ok: true } | { ok: false; message: string }> {
+	const client = new RedisClient(config);
+	const where = `${config.host}:${config.port}`;
+	try {
+		try {
+			await client.command(['PING']);
+		} catch (error) {
+			const text = (error as Error).message;
+			if (/NOAUTH|WRONGPASS|invalid password|invalid username/i.test(text)) {
+				return {
+					ok: false,
+					message: `Redis ${where} rejected the credentials (${text}). Check Redis User and Redis Password.`,
+				};
+			}
+			return {
+				ok: false,
+				message: `Could not connect to Redis ${where}: ${text}. Check Redis Host, Port and TLS, and that Redis is running and reachable from n8n.`,
+			};
+		}
+		try {
+			await client.command(['EVAL', RESERVE_SCRIPT, '1', 'n8n-tess:rl:credential-test', '1']);
+		} catch (error) {
+			return {
+				ok: false,
+				message: `Redis ${where} does not accept the rate limit script (EVAL with TIME): ${(error as Error).message}. Use Redis 5 or newer (or a compatible server with Lua scripting).`,
+			};
+		}
+		return { ok: true };
+	} finally {
+		client.close();
+	}
 }
