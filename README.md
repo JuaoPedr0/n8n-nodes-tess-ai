@@ -1,7 +1,8 @@
 # @conasa/n8n-nodes-tess-ai
 
-Community node do n8n para a API da [Tess AI](https://tess.im): executar agentes, consultar execuções, enviar
-arquivos e gerenciar memórias.
+Community node do n8n para **toda a API REST** da [Tess AI](https://tess.im): agentes (execução, chat no
+formato OpenAI, versões, agendamentos, webhooks, arquivos), execuções, arquivos, memórias, artifacts, Digital
+Employees e uso/auditoria do workspace.
 
 ## Instalação
 
@@ -17,41 +18,66 @@ Crie uma credencial **Tess AI API**:
 | Workspace ID | Tess → *Settings* → *Workspace* (número), ou o parâmetro `w=` na URL do app. Obrigatório em todas as chamadas desde 01/09/2026 |
 | Base URL | `https://api.tess.im` (padrão) |
 | Requests per Second | limite de chamadas por segundo deste token, somando **todos** os workflows e workers (padrão 1, o limite da Tess) |
+| **Redis Host** / **Redis Port** | **obrigatórios** — Redis da fila de rate limit (em produção, o mesmo Redis do n8n em queue mode) |
+| Redis User / Redis Password | opcionais (ACL / senha do Redis) |
+| Redis Database / Redis TLS | opcionais (padrão `0` / desligado) |
 
-O botão **Test** lista um agente para validar token e workspace.
+O botão **Test** valida tudo, nesta ordem, e diz qual campo corrigir:
+
+1. **Redis**: conecta (AUTH/SELECT), faz `PING` e roda o script Lua da fila (exige Redis 5+ ou compatível).
+2. **Tess**: lista um agente (passando pela fila) para validar API Key (403) e Workspace ID (422).
+
+> **Mudança na 0.3.0**: o Redis saiu das variáveis `QUEUE_BULL_REDIS_*` do n8n e passou para a credencial.
+> Credenciais criadas antes precisam ser editadas para informar o Redis.
 
 ## Limite de requisições (fila global)
 
 A Tess aceita cerca de **1 requisição por segundo por token** e responde `429` acima disso. O n8n não coordena
 limites de API entre workflows, então o node mantém uma **fila própria por API Key** (credenciais com o mesmo
-token, mesmo em workspaces diferentes, dividem a mesma fila): todas as chamadas — de todos os workflows e
-execuções — saem em ordem, no máximo *Requests per Second* por segundo.
+token, mesmo em workspaces diferentes, dividem a mesma fila): todas as chamadas — de todos os workflows,
+execuções e workers — saem em ordem, no máximo *Requests per Second* por segundo.
 
-- A fila fica **sempre no Redis da infraestrutura do n8n**, lido das variáveis que o n8n já usa:
-  `QUEUE_BULL_REDIS_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_DB`, `_TLS` (inclusive as variantes `_FILE`).
-  Chave: `n8n-tess:rl:<hash do token>`. Redis Cluster não é suportado.
-- **Sem Redis a execução falha** com `Tess AI rate limit queue unavailable: …` — Redis não configurado, fora do
-  ar ou sem responder em 2 s. O node nunca chama a Tess fora da fila.
-- **n8n local de desenvolvimento**: o painel da central passa ao n8n local as variáveis do Redis da infra,
-  configuradas em `central.local.json` (fora do git; modelo em `central.local.example.json`).
+- A fila fica no **Redis informado na credencial**. Chave: `n8n-tess:rl:<hash do token>`. Redis Cluster não é
+  suportado. Todos os workers que usam a mesma API Key precisam apontar para o mesmo Redis.
+- **Sem Redis a execução falha** com `Tess AI rate limit queue unavailable: …` — Redis vazio na credencial, fora
+  do ar ou sem responder em 2 s. O node nunca chama a Tess fora da fila.
+- **Teste local**: o painel da central sobe o n8n local; o Redis local é o Memurai em `127.0.0.1:6379`
+  (veja `docs/04-testes.md` da central).
 - Se mesmo assim vier `429`, o node espera o `retry_after` informado pela Tess e tenta de novo (até 3 vezes).
-- Enquanto espera um agente ou um arquivo, o intervalo de consulta cresce até 15 s para gastar menos da cota.
+- Enquanto espera um agente, um run ou um arquivo, o intervalo de consulta cresce até 15 s para gastar menos da
+  cota. **Stream Response** (Agent → Execute) evita o polling: uma chamada só por execução.
 
-> Este pacote usa `node:net`/`process.env` para falar com o Redis, por isso é publicado **sem** "cloud support"
-> do n8n (vale para self-hosted; não é elegível à verificação para o n8n Cloud).
+> Este pacote usa `node:net` para falar com o Redis, por isso é publicado **sem** "cloud support" do n8n (vale
+> para self-hosted; não é elegível à verificação para o n8n Cloud).
 
 Erros comuns viram mensagens diretas: API Key inválida (401/403), Workspace ID ausente (422), ID não encontrado
-(404), arquivo grande demais (413), limite da Tess (429).
+(404), arquivo grande demais (413), limite da Tess (429); nos demais, a mensagem, o código e o *correlation id*
+devolvidos pela Tess. Com *Continue On Fail*, o item de erro traz `error` e `description`.
 
 ## Operações
 
 | Recurso | Operações |
 |---|---|
-| **Agent** | **Execute** — roda o agente e devolve a resposta; **Get**; **Get Many**; **Link Files** (arquivos como base de conhecimento) |
-| **Agent Response** | **Get** — status/saída de uma execução; **Get Many** (filtros por agente, conversa, busca) |
-| **File** | **Upload** (até 200 MB; processa e espera ficar pronto, opcional); **Get**; **Get Many**; **Process** |
-| **Memory** | **Create**; **Update**; **Delete**; **Get Many** (por coleção) |
-| **Memory Collection** | **Create**; **Update** (renomear); **Delete** (apaga também as memórias; a coleção padrão não pode ser apagada); **Get Many** |
+| **Account** | Get Current User (`/me`: nome, e-mail, créditos); Get Workspace Usage; Get Mission Control Usage (métricas, agrupamentos, comparação); Get Audit Events (janela de até 30 dias) |
+| **Agent** | **Execute** (roda o agente; polling ou *Stream Response*); **Chat Completion (OpenAI Compatible)**; Get; Get Many; Link Files; List Files; Unlink File |
+| **Agent Response** | Get (status/saída de uma execução); Get Many (filtros por agente, conversa, busca) |
+| **Agent Scheduler** | Create (cron ou execução única); Get; Get Many (todos ou de um agente); Update; Delete; Delete by Conversation |
+| **Agent Version** | Get; Get Many; Rollback |
+| **Artifact** | Create; Get; Get Many; Rename; Edit (operações de patch); Publish Version; Unpublish; Restore Version; Share or Unshare; Get Versions; Delete Version; Delete; Get Templates |
+| **Digital Employee** | Create Standalone; Create From Agent; Get; Get Many; Update; Update Goal; Duplicate; Delete; **Invoke** (com *Wait for Completion*: acompanha o run e devolve o output); Pause; Resume; Preview Schedule; Get Rollback Options; Rollback; Reparent; Detach From Parent; Get Activity; Get Files; Get Capabilities; Approve / Reject Hire Request; Upload Avatar |
+| **Digital Employee Run** | Get; Get Many; Get Output; Get Summary; Retry; Watch (Stream) |
+| **Digital Employee Template** | Export; Preview Import; Import |
+| **File** | Upload (até 200 MB; processa e espera ficar pronto, opcional); Get; Get Many; Process (sync/async); Delete; Update Visibility; Resolve Reference (`doc://` → URL temporária) |
+| **Memory** | Create; Update; Delete; Get Many (por coleção); Import From Text; Get Import Status |
+| **Memory Collection** | Create; Update (renomear); Delete (apaga também as memórias; a coleção padrão não pode ser apagada); Get Many; Get IDs |
+| **Webhook** | Create (por agente); Get Many (todos ou de um agente); Delete |
+
+Convenções em todos os recursos:
+
+- **Get Many** tem *Return All* / *Limit* e pagina sozinho conforme o endpoint (página, cursor ou offset).
+- Campos opcionais ficam em *Additional Fields* / *Update Fields*. Onde a API aceita estruturas livres há
+  **Additional Body (JSON)**, mesclado no corpo — serve para campos novos da Tess que o node ainda não lista.
+- Agente, Digital Employee e Artifact podem ser escolhidos da lista (com busca) ou por ID.
 
 Upload: até 32 MB vai direto (`POST /files`); de 32 MB a 200 MB usa o fluxo v2 da Tess (URL assinada →
 envio direto ao storage → registro), automaticamente. O tamanho é conferido pelos metadados antes de carregar o
@@ -67,13 +93,14 @@ desligado (mesmo comportamento de antes). Nodes novos são v1.1, com *Wait for P
 - **Message**: mensagem do usuário (agentes de chat). Vira `messages: [{ role: "user", content }]`.
 - **Agent Inputs**: os campos que o agente define (ex.: "nome-da-empresa", "max_mode") são carregados
   automaticamente depois de escolher o agente, já com o tipo certo (texto, número, sim/não, lista).
-  `model`, `tools` e `temperature` ficam em *Options* como listas; `stream` não aparece (o node sempre espera a
-  resposta completa).
+  `model`, `tools` e `temperature` ficam em *Options* como listas.
 - **Wait for Completion** (padrão: ligado): a Tess responde em até 100 s; se a execução continuar, o node consulta
   `/agent-responses/{id}` a cada *Poll Interval* até terminar ou atingir o *Timeout* (padrão 600 s;
   **0 = sem limite**, vale só o timeout de execução do n8n, se houver). O *Timeout* é **um prazo único para a
   operação inteira**: processamento dos anexos + execução do agente + correções de JSON.
   Desligado, devolve o ID da execução na hora — consulte depois com *Agent Response → Get*.
+- **Stream Response** (*Options*, só agentes de chat): pede a resposta em stream (SSE) e junta os pedaços —
+  uma chamada só, sem polling. A saída tem o mesmo formato, com `streamed: true`.
 - **Output Format → JSON** (a API da Tess não tem "modo JSON"; o node garante o formato):
   - **Schema Type** — igual ao *Structured Output Parser* do n8n:
     - **Generate From JSON Example** (*JSON Example*): gera o schema a partir de um exemplo — todas as chaves
@@ -110,7 +137,19 @@ desligado (mesmo comportamento de antes). Nodes novos são v1.1, com *Wait for P
   - File IDs (arquivos já enviados; somam com os anexos), Memory Collection IDs, Poll Interval, Timeout.
 
 Saída: o objeto da execução (`id`, `status`, `output`, `credits`, `root_id`, `generated_files`…) + `agent_id`.
-Execução com status diferente de `succeeded` gera erro (use *Continue On Fail* para tratar no fluxo).
+Execução que não termina com `succeeded`/`completed` gera erro (use *Continue On Fail* para tratar no fluxo).
+
+### Agent → Chat Completion (OpenAI Compatible)
+
+Envia *Messages* (System/User/Assistant) para `POST /agents/{id}/openai/chat/completions`, no formato da API de
+Chat Completions da OpenAI. *Simplify* (padrão) devolve só `content`, `finish_reason`, `usage` e `model`;
+desligado, devolve a resposta completa. Modelo = slug da API (ex.: `tess-6`), entre os permitidos pelo agente.
+
+### MCP
+
+A Tess também expõe um **MCP Server** (docs: *MCP Server (API)*). Ele não faz parte deste node: no n8n, use o node
+nativo **MCP Client Tool** apontando para o endpoint MCP da Tess quando quiser que um AI Agent use as
+ferramentas da Tess diretamente.
 
 ### Exemplo: analisar um PDF
 
@@ -126,6 +165,20 @@ O node tem `usableAsTool`: pode ser ligado como *tool* de um AI Agent do n8n (ex
 ## Compatibilidade
 
 Desenvolvido para n8n 2.41.x (Node.js 24).
+
+Alguns corpos de requisição não estão documentados por completo na Tess e foram modelados a partir das
+ferramentas MCP oficiais: **Memory → Import From Text** envia `{ text, collection_id }` e **File → Process**
+envia `mode` na query. Se a Tess rejeitar o Import, ajuste com *Additional Body (JSON)*; nos dois casos, abra uma
+issue para corrigirmos o node.
+
+## Testes
+
+```
+npm test          # vitest: todas as operações, paginação, streams, espera de runs
+```
+
+Os testes de integração da fila rodam contra um Redis em `127.0.0.1:6379` (ou `TESS_TEST_REDIS_HOST` /
+`TESS_TEST_REDIS_PORT`) e são pulados quando não há Redis.
 
 ## Recursos
 
