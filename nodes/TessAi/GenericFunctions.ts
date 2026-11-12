@@ -98,8 +98,28 @@ function friendlyError(this: TessContext, error: unknown): NodeApiError {
 			'The Tess API allows about 1 request per second per token. Lower "Requests per Second" in the credential or run fewer parallel executions.',
 		);
 	}
+	// demais erros: mostra a mensagem e o codigo que a Tess devolveu (o n8n trocaria por texto generico)
+	const body = errorBody(error);
+	const tessMessage = String(
+		dig(body, ['message']) ?? dig(body, ['error']) ?? dig(body, ['errors', '0', 'message']) ?? '',
+	).trim();
+	const tessCode = String(dig(body, ['error_code']) ?? '').trim();
+	if (tessMessage && tessMessage !== 'true') {
+		const hint = WORKFLOW_TOOL_CODES.includes(tessCode)
+			? 'The agent uses a tool/integration (workflow) that Tess could not authenticate. Open the agent in Tess, check its tools/integrations and reconnect them, then try again.'
+			: undefined;
+		const correlation = dig(body, ['correlation_id']);
+		return remap(
+			`Tess error${code ? ` ${code}` : ''}: ${tessMessage}${tessCode ? ` (${tessCode})` : ''}`,
+			[hint, correlation ? `Correlation ID: ${correlation}` : '', detail]
+				.filter(Boolean)
+				.join('\n'),
+		);
+	}
 	return apiError;
 }
+
+const WORKFLOW_TOOL_CODES = ['WORKFLOW_TOOL_AUTHENTICATION_FAILED'];
 
 /** Espera a vez desta chamada na fila do token (Redis do n8n). Sem Redis, falha. */
 async function waitTurn(this: TessContext, credentials: IDataObject): Promise<void> {
