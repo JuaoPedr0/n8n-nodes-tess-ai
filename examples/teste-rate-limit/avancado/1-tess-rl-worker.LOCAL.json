@@ -1,0 +1,180 @@
+{
+	"name": "Tess RL • Worker (local)",
+	"nodes": [
+		{
+			"parameters": {
+				"httpMethod": "POST",
+				"path": "tess-rl-worker",
+				"responseMode": "onReceived",
+				"options": {}
+			},
+			"id": "8d1a2f6e-0c11-4a7e-9b41-0f3a6c1e0a01",
+			"name": "Webhook",
+			"type": "n8n-nodes-base.webhook",
+			"typeVersion": 2,
+			"position": [
+				0,
+				0
+			],
+			"webhookId": "57755f38-411c-493d-ba3f-060a0787e8eb"
+		},
+		{
+			"parameters": {
+				"jsCode": "// Gera N chamadas para este worker (vindas do orquestrador)\nconst b = $input.first().json.body || {};\nconst calls = Math.max(1, Number(b.calls) || 5);\nreturn Array.from({ length: calls }, (_, i) => ({\n  json: { run_id: String(b.run_id || 'manual'), worker: String(b.worker || 'W?'), seq: i + 1 },\n}));"
+			},
+			"id": "8d1a2f6e-0c11-4a7e-9b41-0f3a6c1e0a02",
+			"name": "Gerar chamadas",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [
+				220,
+				0
+			]
+		},
+		{
+			"parameters": {
+				"batchSize": 1,
+				"options": {}
+			},
+			"id": "8d1a2f6e-0c11-4a7e-9b41-0f3a6c1e0a03",
+			"name": "Loop Over Items",
+			"type": "n8n-nodes-base.splitInBatches",
+			"typeVersion": 3,
+			"position": [
+				440,
+				0
+			]
+		},
+		{
+			"parameters": {
+				"resource": "memoryCollection",
+				"operation": "getMany",
+				"returnAll": false,
+				"limit": 1,
+				"filters": {}
+			},
+			"id": "8d1a2f6e-0c11-4a7e-9b41-0f3a6c1e0a04",
+			"name": "Tess AI (1 chamada)",
+			"type": "CUSTOM.tessAi",
+			"typeVersion": 1.1,
+			"position": [
+				660,
+				80
+			],
+			"alwaysOutputData": true,
+			"onError": "continueRegularOutput"
+		},
+		{
+			"parameters": {
+				"jsCode": "// Registra o horario em que a chamada a Tess terminou (e se deu erro)\nconst cur = $('Loop Over Items').first().json;\nconst out = $input.first()?.json || {};\nconst err = out.error ? String(out.error) : '';\nreturn [{\n  json: {\n    run_id: cur.run_id,\n    worker: cur.worker,\n    seq: cur.seq,\n    at_ms: Date.now(),\n    status: err ? 'error' : 'ok',\n    error: err.slice(0, 300),\n  },\n}];"
+			},
+			"id": "8d1a2f6e-0c11-4a7e-9b41-0f3a6c1e0a05",
+			"name": "Carimbar horário",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [
+				880,
+				80
+			]
+		},
+		{
+			"parameters": {
+				"dataTableId": {
+					"__rl": true,
+					"mode": "name",
+					"value": "tess_rl_test"
+				},
+				"columns": {
+					"mappingMode": "autoMapInputData",
+					"value": {},
+					"matchingColumns": [],
+					"schema": [],
+					"attemptToConvertTypes": false,
+					"convertFieldsToString": false
+				},
+				"options": {}
+			},
+			"id": "8d1a2f6e-0c11-4a7e-9b41-0f3a6c1e0a06",
+			"name": "Gravar na Data Table",
+			"type": "n8n-nodes-base.dataTable",
+			"typeVersion": 1.1,
+			"position": [
+				1100,
+				80
+			]
+		}
+	],
+	"connections": {
+		"Webhook": {
+			"main": [
+				[
+					{
+						"node": "Gerar chamadas",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Gerar chamadas": {
+			"main": [
+				[
+					{
+						"node": "Loop Over Items",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Loop Over Items": {
+			"main": [
+				[],
+				[
+					{
+						"node": "Tess AI (1 chamada)",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Tess AI (1 chamada)": {
+			"main": [
+				[
+					{
+						"node": "Carimbar horário",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Carimbar horário": {
+			"main": [
+				[
+					{
+						"node": "Gravar na Data Table",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Gravar na Data Table": {
+			"main": [
+				[
+					{
+						"node": "Loop Over Items",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
+	"settings": {
+		"executionOrder": "v1"
+	},
+	"pinData": {}
+}

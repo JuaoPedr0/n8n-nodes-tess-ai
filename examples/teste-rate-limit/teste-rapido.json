@@ -1,0 +1,75 @@
+{
+	"name": "Teste rápido • Rate limit Tess",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "c8fbb472-91ed-4852-9a14-fa27a0b86cf3",
+			"name": "Executar",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [
+				0,
+				0
+			]
+		},
+		{
+			"parameters": {
+				"jsCode": "// 20 itens = 20 chamadas à Tess\nreturn Array.from({ length: 20 }, (_, i) => ({ json: { n: i + 1 } }));"
+			},
+			"id": "af565ff3-cca4-4c48-90f7-5c3ed54100c8",
+			"name": "20 chamadas",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [
+				220,
+				0
+			]
+		},
+		{
+			"parameters": {
+				"resource": "memoryCollection",
+				"operation": "getMany",
+				"returnAll": false,
+				"limit": 1,
+				"filters": {}
+			},
+			"id": "34c38612-3574-44af-8837-8af8a7a089da",
+			"name": "Tess AI",
+			"type": "@conasa/n8n-nodes-tess-ai.tessAi",
+			"typeVersion": 1.1,
+			"position": [
+				440,
+				0
+			],
+			"alwaysOutputData": true
+		}
+	],
+	"connections": {
+		"Executar": {
+			"main": [
+				[
+					{
+						"node": "20 chamadas",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"20 chamadas": {
+			"main": [
+				[
+					{
+						"node": "Tess AI",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
+	"settings": {
+		"executionOrder": "v1"
+	},
+	"pinData": {}
+}

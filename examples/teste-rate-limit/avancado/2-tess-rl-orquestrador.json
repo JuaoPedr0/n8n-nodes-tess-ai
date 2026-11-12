@@ -1,0 +1,283 @@
+{
+	"name": "Tess RL • Orquestrador e Resultado",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "4b7c9e10-5d2a-4c8f-8e61-1a2b3c4d5e01",
+			"name": "Iniciar teste",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [
+				0,
+				0
+			]
+		},
+		{
+			"parameters": {
+				"assignments": {
+					"assignments": [
+						{
+							"id": "c1",
+							"name": "base_url",
+							"value": "https://SEU-N8N.exemplo.com.br",
+							"type": "string"
+						},
+						{
+							"id": "c2",
+							"name": "workers",
+							"value": 4,
+							"type": "number"
+						},
+						{
+							"id": "c3",
+							"name": "calls",
+							"value": 8,
+							"type": "number"
+						},
+						{
+							"id": "c4",
+							"name": "rps",
+							"value": 1,
+							"type": "number"
+						},
+						{
+							"id": "c5",
+							"name": "run_id",
+							"value": "={{ 'rl-' + $now.toFormat('yyyyMMdd-HHmmss') }}",
+							"type": "string"
+						}
+					]
+				},
+				"options": {}
+			},
+			"id": "4b7c9e10-5d2a-4c8f-8e61-1a2b3c4d5e02",
+			"name": "Config",
+			"type": "n8n-nodes-base.set",
+			"typeVersion": 3.4,
+			"position": [
+				220,
+				0
+			]
+		},
+		{
+			"parameters": {
+				"resource": "table",
+				"operation": "create",
+				"tableName": "tess_rl_test",
+				"columns": {
+					"column": [
+						{
+							"name": "run_id",
+							"type": "string"
+						},
+						{
+							"name": "worker",
+							"type": "string"
+						},
+						{
+							"name": "seq",
+							"type": "number"
+						},
+						{
+							"name": "at_ms",
+							"type": "number"
+						},
+						{
+							"name": "status",
+							"type": "string"
+						},
+						{
+							"name": "error",
+							"type": "string"
+						}
+					]
+				},
+				"options": {
+					"createIfNotExists": true
+				}
+			},
+			"id": "4b7c9e10-5d2a-4c8f-8e61-1a2b3c4d5e03",
+			"name": "Criar Data Table (se não existir)",
+			"type": "n8n-nodes-base.dataTable",
+			"typeVersion": 1.1,
+			"position": [
+				440,
+				0
+			]
+		},
+		{
+			"parameters": {
+				"jsCode": "// Um item por worker: cada um vira uma execucao independente do workflow Worker\nconst cfg = $('Config').first().json;\nreturn Array.from({ length: cfg.workers }, (_, i) => ({\n  json: { run_id: cfg.run_id, worker: 'W' + (i + 1), calls: cfg.calls },\n}));"
+			},
+			"id": "4b7c9e10-5d2a-4c8f-8e61-1a2b3c4d5e04",
+			"name": "Montar workers",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [
+				660,
+				0
+			]
+		},
+		{
+			"parameters": {
+				"method": "POST",
+				"url": "={{ $('Config').first().json.base_url.replace(/\\/+$/, '') }}/webhook/tess-rl-worker",
+				"sendBody": true,
+				"specifyBody": "json",
+				"jsonBody": "={{ { run_id: $json.run_id, worker: $json.worker, calls: $json.calls } }}",
+				"options": {}
+			},
+			"id": "4b7c9e10-5d2a-4c8f-8e61-1a2b3c4d5e05",
+			"name": "Disparar workers em paralelo",
+			"type": "n8n-nodes-base.httpRequest",
+			"typeVersion": 4.2,
+			"position": [
+				880,
+				0
+			]
+		},
+		{
+			"parameters": {
+				"amount": "={{ Math.ceil($('Config').first().json.workers * $('Config').first().json.calls / $('Config').first().json.rps) + 30 }}",
+				"unit": "seconds"
+			},
+			"id": "4b7c9e10-5d2a-4c8f-8e61-1a2b3c4d5e06",
+			"name": "Aguardar os workers",
+			"type": "n8n-nodes-base.wait",
+			"typeVersion": 1.1,
+			"position": [
+				1100,
+				0
+			],
+			"executeOnce": true,
+			"webhookId": "8cae1be4-bb10-4cf7-a3fb-ec35a8b44b9a"
+		},
+		{
+			"parameters": {
+				"operation": "get",
+				"dataTableId": {
+					"__rl": true,
+					"mode": "name",
+					"value": "tess_rl_test"
+				},
+				"matchType": "allConditions",
+				"filters": {
+					"conditions": [
+						{
+							"keyName": "run_id",
+							"condition": "eq",
+							"keyValue": "={{ $('Config').first().json.run_id }}"
+						}
+					]
+				},
+				"returnAll": true
+			},
+			"id": "4b7c9e10-5d2a-4c8f-8e61-1a2b3c4d5e07",
+			"name": "Ler resultados",
+			"type": "n8n-nodes-base.dataTable",
+			"typeVersion": 1.1,
+			"position": [
+				1320,
+				0
+			],
+			"executeOnce": true,
+			"alwaysOutputData": true
+		},
+		{
+			"parameters": {
+				"jsCode": "// Analisa se a fila global respeitou o limite somando TODAS as execucoes\nconst cfg = $('Config').first().json;\nconst rows = $input.all().map((i) => i.json)\n  .filter((r) => r.run_id === cfg.run_id && r.at_ms)\n  .sort((a, b) => a.at_ms - b.at_ms);\nconst expected = cfg.workers * cfg.calls;\nif (!rows.length) {\n  return [{ json: { verdict: 'SEM DADOS — confira se o workflow Worker está publicado, a base_url e a credencial do node Tess AI', expected } }];\n}\nconst errors = rows.filter((r) => r.status !== 'ok');\nconst rateLimited = errors.filter((r) => /rate limit|429/i.test(r.error)).length;\nconst duration = (rows[rows.length - 1].at_ms - rows[0].at_ms) / 1000;\nconst rate = rows.length > 1 && duration > 0 ? (rows.length - 1) / duration : 0;\nconst gaps = rows.slice(1).map((r, i) => r.at_ms - rows[i].at_ms);\n// maior numero de chamadas em qualquer janela de 5 s\nlet maxIn5 = 0;\nfor (let i = 0, j = 0; i < rows.length; i++) {\n  while (rows[i].at_ms - rows[j].at_ms >= 5000) j++;\n  maxIn5 = Math.max(maxIn5, i - j + 1);\n}\nconst perWorker = {};\nfor (const r of rows) perWorker[r.worker] = (perWorker[r.worker] || 0) + 1;\nconst respected = rateLimited === 0 && rate <= cfg.rps * 1.15 && maxIn5 <= cfg.rps * 5 + 2;\nconst queueOk = rate <= cfg.rps * 1.15 && maxIn5 <= cfg.rps * 5 + 2;\nreturn [{\n  json: {\n    verdict: errors.length === rows.length\n      ? 'INCONCLUSIVO — todas as chamadas falharam (veja error_samples); o espaçamento ' + (queueOk ? 'respeitou' : 'NÃO respeitou') + ' o limite'\n      : respected && errors.length === 0 && rows.length === expected\n        ? 'OK — as execuções paralelas respeitaram o limite como uma fila única, sem erros'\n        : 'ATENÇÃO — veja os números abaixo',\n    run_id: cfg.run_id,\n    calls_expected: expected,\n    calls_recorded: rows.length,\n    ok: rows.length - errors.length,\n    errors: errors.length,\n    rate_limited_429: rateLimited,\n    configured_rps: cfg.rps,\n    effective_rate_per_s: Number(rate.toFixed(2)),\n    max_calls_in_any_5s: maxIn5,\n    duration_s: Number(duration.toFixed(1)),\n    min_gap_ms: gaps.length ? Math.min(...gaps) : null,\n    avg_gap_ms: gaps.length ? Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length) : null,\n    calls_per_worker: perWorker,\n    error_samples: errors.slice(0, 5).map((e) => e.error),\n  },\n}];"
+			},
+			"id": "4b7c9e10-5d2a-4c8f-8e61-1a2b3c4d5e08",
+			"name": "Analisar",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [
+				1540,
+				0
+			]
+		}
+	],
+	"connections": {
+		"Iniciar teste": {
+			"main": [
+				[
+					{
+						"node": "Config",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Config": {
+			"main": [
+				[
+					{
+						"node": "Criar Data Table (se não existir)",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Criar Data Table (se não existir)": {
+			"main": [
+				[
+					{
+						"node": "Montar workers",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Montar workers": {
+			"main": [
+				[
+					{
+						"node": "Disparar workers em paralelo",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Disparar workers em paralelo": {
+			"main": [
+				[
+					{
+						"node": "Aguardar os workers",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Aguardar os workers": {
+			"main": [
+				[
+					{
+						"node": "Ler resultados",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Ler resultados": {
+			"main": [
+				[
+					{
+						"node": "Analisar",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
+	"settings": {
+		"executionOrder": "v1"
+	},
+	"pinData": {}
+}
