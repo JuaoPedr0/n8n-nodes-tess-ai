@@ -155,16 +155,73 @@ describe('Digital Employee → Invoke', () => {
 describe('erros da Tess e da rede', () => {
 	const audit = { resource: 'account', operation: 'getAuditEvents', from: '2026-11-01', to: '2026-11-02', filters: {}, returnAll: false, limit: 50 };
 
-	it('403 de permissao mostra a mensagem da Tess, nao "API Key invalida"', async () => {
-		const forbidden = Object.assign(new Error('Request failed with status code 403'), {
-			httpCode: '403',
-			response: { status: 403, data: { message: 'You do not have permission to access this feature.', type: 'error', status: 403 } },
+	// formato real do n8n 2.x (legacy request): status em statusCode e o corpo da Tess como TEXTO em `error`
+	const tessHttpError = (status: number, body: string) =>
+		Object.assign(new Error(`${status} - ${JSON.stringify(body)}`), {
+			statusCode: status,
+			status,
+			error: body,
+			response: { status, statusText: 'x', headers: {} },
 		});
-		await expect(
-			run(audit, () => {
-				throw forbidden;
-			}),
-		).rejects.toThrow(/No permission for this Tess feature: You do not have permission/);
+	const failure = async (params: Record<string, unknown>, error: unknown) => {
+		try {
+			await run(params, () => {
+				throw error;
+			});
+		} catch (e) {
+			return e as { message: string; description: string; httpCode?: string };
+		}
+		throw new Error('era para falhar');
+	};
+
+	it('erro HTTP: mensagem exata da Tess, origem "Tess API", requisicao e corpo bruto', async () => {
+		const body = '{"message":"You do not have permission to access this feature.","type":"error","status":403}';
+		const err = await failure(audit, tessHttpError(403, body));
+		expect(err.message).toBe('Tess API error 403: You do not have permission to access this feature.');
+		expect(err.description).toContain('Source: Tess API (HTTP 403)');
+		expect(err.description).toContain('Request: GET /audit-events');
+		expect(err.description).toContain(`Tess response: ${body}`);
+		expect(err.description).toMatch(/Node hint: The credential works/);
+	});
+
+	it('erro HTTP com corpo nao-JSON mostra o texto da Tess como veio', async () => {
+		const err = await failure(audit, tessHttpError(502, '<html>Bad Gateway</html>'));
+		expect(err.message).toBe('Tess API error 502: <html>Bad Gateway</html>');
+		expect(err.description).toContain('Tess response: <html>Bad Gateway</html>');
+	});
+
+	it('correlation id e error_code da Tess aparecem', async () => {
+		const body = '{"message":"Tool auth failed","error_code":"WORKFLOW_TOOL_AUTHENTICATION_FAILED","correlation_id":"abc-123"}';
+		const err = await failure(audit, tessHttpError(500, body));
+		expect(err.message).toBe('Tess API error 500: Tool auth failed (WORKFLOW_TOOL_AUTHENTICATION_FAILED)');
+		expect(err.description).toContain('Correlation ID: abc-123');
+	});
+
+	it('sem resposta: origem "Network", deixando claro que a Tess nao reportou erro', async () => {
+		const err = await failure(
+			{ resource: 'agent', operation: 'execute', agent: '10', message: 'oi', inputs: { value: {} }, waitForCompletion: false, outputFormat: 'text', options: {} },
+			Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+		);
+		expect(err.message).toBe('No response from Tess (ECONNRESET): socket hang up');
+		expect(err.description).toContain('Source: Network');
+		expect(err.description).toContain('Request: POST /agents/10/execute');
+	});
+
+	it('erro do proprio node: origem "Tess AI node"', async () => {
+		const err = await failure({ resource: 'nope', operation: 'x' }, new Error('nao chamado'));
+		expect(err.message).toContain('Unknown resource');
+		expect(err.description).toContain('Source: Tess AI node');
+	});
+
+	it('execucao que a Tess reporta como falha traz o objeto da Tess', async () => {
+		const { ctx } = fakeContext(
+			{ resource: 'agent', operation: 'execute', agent: '10', message: 'oi', inputs: { value: {} }, waitForCompletion: true, outputFormat: 'text', options: { pollInterval: 1, timeout: 30 } },
+			() => ({ responses: [{ id: 9, status: 'failed', error: 'model overloaded', output: '' }] }),
+		);
+		const e = await node.execute.call(ctx).catch((x) => x as { message: string; description: string });
+		expect(e.message).toBe('Agent execution 9 ended with status "failed": model overloaded');
+		expect(e.description).toContain('Source: Tess API — the request succeeded, but Tess reported this result:');
+		expect(e.description).toContain('"error":"model overloaded"');
 	});
 
 	it('GET com conexao cortada (socket hang up) tenta de novo', async () => {

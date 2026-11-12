@@ -23,6 +23,7 @@ const CONNECTION_DROP_CODES = ['ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ETIMEDOUT
 
 /** A conexao caiu sem resposta HTTP (proxy/firewall cortou, "socket hang up")? */
 function isConnectionDrop(error: unknown, httpCode: string): boolean {
+	if (/^\d{3}$/.test(httpCode)) return false;
 	if (CONNECTION_DROP_CODES.includes(httpCode)) return true;
 	const raw = [dig(error, ['code']), dig(error, ['cause', 'code']), dig(error, ['message'])]
 		.filter((v) => v !== undefined)
@@ -45,19 +46,35 @@ function dig(source: unknown, path: string[]): unknown {
 	return current;
 }
 
-/** Corpo da resposta de erro (axios, request ou n8n), quando houver. */
-function errorBody(error: unknown): unknown {
+/** Corpo bruto da resposta de erro, como texto (o n8n 2.x entrega em `error.error`, ja como string). */
+function rawErrorBody(error: unknown): string | undefined {
 	for (const path of [
+		['error'],
 		['response', 'data'],
 		['response', 'body'],
 		['cause', 'response', 'data'],
-		['error'],
+		['cause', 'error'],
 		['errorResponse'],
 	]) {
 		const value = dig(error, path);
-		if (value !== undefined && value !== null && value !== '') return value;
+		if (value === undefined || value === null || value === '') continue;
+		if (typeof value === 'string') return value;
+		if (Buffer.isBuffer(value)) return value.toString('utf8');
+		if (typeof value === 'object') return JSON.stringify(value);
+		return String(value);
 	}
 	return undefined;
+}
+
+/** Corpo da resposta como objeto, quando for JSON. */
+function errorBody(error: unknown): unknown {
+	const raw = rawErrorBody(error);
+	if (raw === undefined) return undefined;
+	try {
+		return JSON.parse(raw);
+	} catch {
+		return raw;
+	}
 }
 
 function retryAfterSeconds(error: unknown): number {
@@ -70,75 +87,126 @@ function retryAfterSeconds(error: unknown): number {
 	return Math.min(60, Number.isFinite(seconds) && seconds > 0 ? seconds : 5);
 }
 
-function bodyText(error: unknown): string {
-	const body = errorBody(error);
-	if (body === undefined) return '';
-	return typeof body === 'string' ? body : JSON.stringify(body);
+/** Status HTTP da resposta da Tess (undefined = nao houve resposta: falha de rede). */
+function httpStatus(error: unknown): number | undefined {
+	for (const path of [['statusCode'], ['status'], ['response', 'status'], ['cause', 'response', 'status'], ['httpCode']]) {
+		const value = Number(dig(error, path));
+		if (Number.isInteger(value) && value >= 100 && value < 600) return value;
+	}
+	return undefined;
 }
 
-/** Traduz os erros mais comuns da Tess para mensagens acionaveis. */
-function friendlyError(this: TessContext, error: unknown): NodeApiError {
-	const apiError = new NodeApiError(this.getNode(), error as JsonObject);
-	const code = String(apiError.httpCode ?? '');
-	const text = bodyText(error);
-	const detail = text ? `Tess response: ${text.slice(0, 500)}` : undefined;
-	const remap = (message: string, description?: string) =>
-		new NodeApiError(this.getNode(), error as JsonObject, {
-			message,
-			description: description ?? detail,
-			httpCode: code,
-		});
+export const SOURCE_TESS = 'Tess API';
+export const SOURCE_NETWORK = 'Network';
+export const SOURCE_NODE = 'Tess AI node';
 
-	if (code === '401' || code === '403') {
-		if (/default collection/i.test(text))
-			return remap('The default memory collection cannot be deleted');
-		// 403 de permissao do recurso (ex.: auditoria exige admin) nao e credencial errada
-		const permission = String(dig(errorBody(error), ['message']) ?? '');
-		if (code === '403' && /permission|not allowed|forbidden to access|feature/i.test(permission)) {
-			return remap(
-				`No permission for this Tess feature: ${permission}`,
-				'The credential works, but the user that owns this API Key lacks access to this resource in the workspace (some features, like audit events, need an admin role or a plan that includes them).',
-			);
-		}
-		return remap(
-			'Invalid API Key or no access to this workspace',
-			'Check the API Key and the Workspace ID in the "Tess AI API" credential.',
-		);
+export interface TessRequestInfo {
+	method: string;
+	endpoint: string;
+}
+
+/** Interpretacao do node para os erros mais comuns (vai como "Node hint", sem esconder a resposta da Tess). */
+function nodeHint(status: number, tessMessage: string, tessCode: string, raw: string): string | undefined {
+	if (WORKFLOW_TOOL_CODES.includes(tessCode))
+		return 'The agent uses a tool/integration (workflow) that Tess could not authenticate. Open the agent in Tess, check its tools/integrations and reconnect them.';
+	if (status === 401) return 'Tess rejected the API Key. Check "API Key" in the "Tess AI API" credential.';
+	if (status === 403) {
+		if (/default collection/i.test(raw)) return 'The default memory collection cannot be deleted.';
+		if (/permission|not allowed|feature/i.test(tessMessage))
+			return 'The credential works, but the user that owns this API Key has no access to this feature in the workspace (some features, like audit events, need an admin role or a plan that includes them).';
+		return 'Check the API Key and the Workspace ID in the "Tess AI API" credential.';
 	}
-	if (code === '422' && /workspace/i.test(text)) {
-		return remap(
-			'Workspace ID missing or invalid',
-			'Fill in the numeric Workspace ID in the "Tess AI API" credential (Tess → Settings → Workspace).',
-		);
-	}
-	if (code === '404')
-		return remap('Not found — check the ID and whether it belongs to this workspace');
-	if (code === '413') return remap('File too large for this endpoint');
-	if (code === '429') {
-		return remap(
-			'Tess rate limit reached — try again later',
-			'The Tess API allows about 1 request per second per token. Lower "Requests per Second" in the credential or run fewer parallel executions.',
-		);
-	}
-	// demais erros: mostra a mensagem e o codigo que a Tess devolveu (o n8n trocaria por texto generico)
+	if (status === 422 && /workspace/i.test(raw))
+		return 'Fill in the numeric Workspace ID in the "Tess AI API" credential (Tess → Settings → Workspace).';
+	if (status === 404) return 'Check the ID and whether it belongs to this workspace.';
+	if (status === 413) return 'File too large for this endpoint.';
+	if (status === 429)
+		return 'The Tess API allows about 1 request per second per token. Lower "Requests per Second" in the credential or run fewer parallel executions.';
+	return undefined;
+}
+
+/**
+ * Erro de uma chamada a Tess, sempre com a origem explicita:
+ * - "Tess API": a Tess respondeu com erro HTTP. A mensagem e exatamente o que a Tess disse e a descricao traz
+ *   o corpo bruto da resposta (e o correlation id), para separar erro da Tess de erro do node.
+ * - "Network": nao houve resposta (conexao cortada, DNS, proxy, certificado).
+ * Tambem registra o erro no log do n8n (n8n.log) com os mesmos dados, em JSON.
+ */
+function friendlyError(this: TessContext, error: unknown, request: TessRequestInfo): NodeApiError {
+	const status = httpStatus(error);
+	const raw = rawErrorBody(error) ?? '';
 	const body = errorBody(error);
-	const tessMessage = String(
-		dig(body, ['message']) ?? dig(body, ['error']) ?? dig(body, ['errors', '0', 'message']) ?? '',
-	).trim();
-	const tessCode = String(dig(body, ['error_code']) ?? '').trim();
-	if (tessMessage && tessMessage !== 'true') {
-		const hint = WORKFLOW_TOOL_CODES.includes(tessCode)
-			? 'The agent uses a tool/integration (workflow) that Tess could not authenticate. Open the agent in Tess, check its tools/integrations and reconnect them, then try again.'
-			: undefined;
-		const correlation = dig(body, ['correlation_id']);
-		return remap(
-			`Tess error${code ? ` ${code}` : ''}: ${tessMessage}${tessCode ? ` (${tessCode})` : ''}`,
-			[hint, correlation ? `Correlation ID: ${correlation}` : '', detail]
-				.filter(Boolean)
-				.join('\n'),
-		);
+	const where = `${request.method} ${request.endpoint}`;
+
+	if (status === undefined) {
+		const code = String(dig(error, ['code']) ?? dig(error, ['cause', 'code']) ?? '').trim();
+		const reason = String(dig(error, ['message']) ?? dig(error, ['cause', 'message']) ?? 'no response').trim();
+		const message = `No response from Tess (${code || 'network error'}): ${reason}`;
+		const description = [
+			`Source: ${SOURCE_NETWORK} — the request did not get any answer from Tess (connection dropped, DNS, proxy/firewall or certificate). Tess did not report an error.`,
+			`Request: ${where}`,
+		].join('\n');
+		this.logger?.error('Tess AI request failed', { source: SOURCE_NETWORK, request: where, code, reason });
+		const networkError = new NodeApiError(this.getNode(), error as JsonObject, { message, description, httpCode: code || undefined });
+		// o n8n troca a mensagem por um texto generico quando reconhece o codigo (ECONNRESET...): mantem a nossa
+		networkError.message = message;
+		networkError.description = description;
+		return networkError;
 	}
+
+	const tessMessage = String(
+		dig(body, ['message']) ?? dig(body, ['error', 'message']) ?? dig(body, ['errors', '0', 'message']) ?? dig(body, ['error']) ?? '',
+	).trim();
+	const tessCode = String(dig(body, ['error_code']) ?? dig(body, ['code']) ?? '').trim();
+	const correlationId = dig(body, ['correlation_id']) ?? dig(body, ['correlationId']);
+	const said = tessMessage && tessMessage !== 'true' ? tessMessage : raw.slice(0, 300) || `HTTP ${status}`;
+	const hint = nodeHint(status, tessMessage, tessCode, raw);
+
+	const message = `Tess API error ${status}: ${said}${tessCode ? ` (${tessCode})` : ''}`;
+	const description = [
+		`Source: ${SOURCE_TESS} (HTTP ${status}) — the message above is exactly what Tess returned.`,
+		`Request: ${where}`,
+		correlationId ? `Correlation ID: ${String(correlationId)}` : '',
+		`Tess response: ${raw ? raw.slice(0, 4000) : '(empty body)'}`,
+		hint ? `Node hint: ${hint}` : '',
+	]
+		.filter(Boolean)
+		.join('\n');
+
+	this.logger?.error('Tess AI request failed', {
+		source: SOURCE_TESS,
+		request: where,
+		status,
+		tessMessage: said,
+		tessCode: tessCode || undefined,
+		correlationId: correlationId === undefined ? undefined : String(correlationId),
+		tessResponse: raw.slice(0, 4000),
+	});
+	const apiError = new NodeApiError(this.getNode(), error as JsonObject, { message, description, httpCode: String(status) });
+	apiError.message = message;
+	apiError.description = description;
 	return apiError;
+}
+
+/**
+ * A chamada deu certo, mas o resultado devolvido pela Tess indica falha (ex.: execucao com status "failed").
+ * O objeto da Tess vai inteiro na descricao.
+ */
+export function tessResultError(
+	this: TessContext,
+	message: string,
+	itemIndex: number,
+	payload: unknown,
+): NodeOperationError {
+	const raw = typeof payload === 'string' ? payload : JSON.stringify(payload);
+	this.logger?.error('Tess AI reported a failed result', { source: SOURCE_TESS, message, tessResponse: raw.slice(0, 4000) });
+	return new NodeOperationError(this.getNode(), message, {
+		itemIndex,
+		description: [
+			`Source: ${SOURCE_TESS} — the request succeeded, but Tess reported this result:`,
+			raw.slice(0, 4000),
+		].join('\n'),
+	});
 }
 
 const WORKFLOW_TOOL_CODES = ['WORKFLOW_TOOL_AUTHENTICATION_FAILED'];
@@ -209,7 +277,8 @@ export async function tessApiRequest(
 		} catch (error) {
 			failure = error;
 		}
-		const code = String(new NodeApiError(this.getNode(), failure as JsonObject).httpCode ?? '');
+		const status = httpStatus(failure);
+		const code = status === undefined ? String(dig(failure, ['code']) ?? '') : String(status);
 		// conexao cortada (proxy/rede) antes de qualquer resposta: repete so leituras, que sao seguras
 		if (method === 'GET' && isConnectionDrop(failure, code) && attempt < MAX_CONNECTION_RETRIES) {
 			const seconds = 2 ** attempt;
@@ -227,7 +296,7 @@ export async function tessApiRequest(
 			await sleep(seconds * 1000);
 			continue;
 		}
-		throw friendlyError.call(this, failure);
+		throw friendlyError.call(this, failure, { method, endpoint });
 	}
 }
 
@@ -366,10 +435,11 @@ export async function waitForFileProcessing(
 		const status = String(current.status ?? '').toLowerCase();
 		if (FILE_READY.includes(status)) return current;
 		if (FILE_FAILED.includes(status)) {
-			throw new NodeOperationError(
-				this.getNode(),
+			throw tessResultError.call(
+				this,
 				`Tess could not process file ${current.id} (${current.filename ?? ''}): status "${current.status}"`,
-				{ itemIndex },
+				itemIndex,
+				current,
 			);
 		}
 		if (!FILE_IN_PROGRESS.includes(status)) {

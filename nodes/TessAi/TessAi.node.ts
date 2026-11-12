@@ -71,7 +71,9 @@ import { tessAiApiTest } from './CredentialTest';
 import {
 	AGENT_SUCCEEDED,
 	parseIdList,
+	SOURCE_NODE,
 	tessApiRequest,
+	tessResultError,
 	tessApiRequestAllItems,
 	deadlineFrom,
 	uploadBinary,
@@ -409,12 +411,23 @@ export class TessAi implements INodeType {
 				);
 				returnData.push(...executionData);
 			} catch (error) {
+				// erro gerado pelo proprio node (validacao, fila/Redis, tempo limite): deixa a origem explicita
+				const err = error as { description?: unknown; message?: string };
+				if (!/^Source: /m.test(String(err.description ?? ''))) {
+					err.description = [
+						`Source: ${SOURCE_NODE} — raised by the node before or after talking to Tess; it is not a Tess error.`,
+						err.description ? String(err.description) : '',
+					]
+						.filter(Boolean)
+						.join('\n');
+				}
 				if (this.continueOnFail()) {
-					const description = (error as { description?: unknown }).description;
+					const description = String(err.description ?? '');
 					returnData.push({
 						json: {
-							error: (error as Error).message,
-							...(description ? { description: String(description) } : {}),
+							error: err.message ?? String(error),
+							source: /^Source: ([^—(]+)/m.exec(description)?.[1]?.trim(),
+							description,
 						},
 						pairedItem: { item: i },
 					});
@@ -586,11 +599,12 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 			if (useStream) {
 				const streamed = await streamAgentExecution.call(this, agentId, requestBody, i, deadline);
 				if (!AGENT_SUCCEEDED.includes(String(streamed.status ?? '').toLowerCase())) {
-					throw new NodeOperationError(
-						this.getNode(),
-						`Agent execution ${streamed.id} ended with status "${streamed.status}"`,
-						{ itemIndex: i, description: String(streamed.output ?? '') },
-					);
+					throw tessResultError.call(
+					this,
+					`Agent execution ${streamed.id} ended with status "${streamed.status}"${streamed.error ? `: ${typeof streamed.error === 'string' ? streamed.error : JSON.stringify(streamed.error)}` : ''}`,
+					i,
+					streamed,
+				);
 				}
 				return streamed;
 			}
@@ -610,10 +624,11 @@ async function executeAgent(this: IExecuteFunctions, operation: string, i: numbe
 				intervalSeconds: (options.pollInterval as number) ?? 3,
 			});
 			if (!AGENT_SUCCEEDED.includes(String(execution.status ?? '').toLowerCase())) {
-				throw new NodeOperationError(
-					this.getNode(),
-					`Agent execution ${execution.id} ended with status "${execution.status}"`,
-					{ itemIndex: i, description: String(execution.output ?? '') },
+				throw tessResultError.call(
+					this,
+					`Agent execution ${execution.id} ended with status "${execution.status}"${execution.error ? `: ${typeof execution.error === 'string' ? execution.error : JSON.stringify(execution.error)}` : ''}`,
+					i,
+					execution,
 				);
 			}
 			return execution;

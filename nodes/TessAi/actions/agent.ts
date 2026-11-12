@@ -3,6 +3,7 @@
 import type { IDataObject, IExecuteFunctions } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
+import { tessResultError } from '../GenericFunctions';
 import type { HandlerMap } from './common';
 import { clean, listOrSelf, numericId, request, requestSse, textId, withExtraBody } from './common';
 
@@ -84,13 +85,11 @@ export async function streamAgentExecution(
 		if (typeof event.output === 'string') output += event.output;
 		last = { ...last, ...event };
 		if (event.error) {
-			throw new NodeOperationError(
-				this.getNode(),
-				`Agent execution ${event.id ?? ''} failed while streaming`,
-				{
-					itemIndex,
-					description: typeof event.error === 'string' ? event.error : JSON.stringify(event.error),
-				},
+			throw tessResultError.call(
+				this,
+				`Agent execution ${event.id ?? ''} failed while streaming: ${typeof event.error === 'string' ? event.error : JSON.stringify(event.error)}`,
+				itemIndex,
+				event,
 			);
 		}
 	}

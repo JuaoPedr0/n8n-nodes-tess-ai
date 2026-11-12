@@ -73,7 +73,7 @@ export function fakeContext(
 		getCredentials: async () => CREDENTIALS,
 		getNode: () => ({ name: 'Tess AI', type: 'tessAi', typeVersion, parameters: {} }),
 		continueOnFail: () => false,
-		logger: { info: () => undefined, warn: () => undefined, debug: () => undefined },
+		logger: { info: () => undefined, warn: () => undefined, debug: () => undefined, error: () => undefined },
 		helpers: {
 			httpRequestWithAuthentication,
 			httpRequest: vi.fn(async () => ({})),

@@ -99,9 +99,12 @@ export async function tessAiApiTest(
 				message: `Tess rate limit reached (HTTP 429) — wait a minute and test again.${suffix}`,
 			};
 		}
+		if (status) {
+			return { status: 'Error', message: `Tess API error ${status}.${suffix || ` ${(error as Error).message}`}` };
+		}
 		return {
 			status: 'Error',
-			message: `Could not reach Tess at ${baseUrl}${status ? ` (HTTP ${status})` : ''}: ${(error as Error).message}`,
+			message: `No response from Tess at ${baseUrl} (network: connection, DNS, proxy or certificate — Tess did not report an error): ${(error as Error).message}`,
 		};
 	}
 
