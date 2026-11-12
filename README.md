@@ -50,9 +50,24 @@ execuções e workers — saem em ordem, no máximo *Requests per Second* por se
 > Este pacote usa `node:net` para falar com o Redis, por isso é publicado **sem** "cloud support" do n8n (vale
 > para self-hosted; não é elegível à verificação para o n8n Cloud).
 
-Erros comuns viram mensagens diretas: API Key inválida (401/403), Workspace ID ausente (422), ID não encontrado
-(404), arquivo grande demais (413), limite da Tess (429); nos demais, a mensagem, o código e o *correlation id*
-devolvidos pela Tess. Com *Continue On Fail*, o item de erro traz `error` e `description`.
+### Erros: de onde veio
+
+Todo erro diz a **origem** na primeira linha da descrição, para separar problema da Tess de problema do node:
+
+| Source | Significa | Mensagem |
+|---|---|---|
+| `Tess API (HTTP xxx)` | a Tess respondeu com erro | **exatamente o texto da Tess** (`Tess API error 403: You do not have permission…`) |
+| `Tess API — … Tess reported this result` | a chamada deu certo, mas a Tess devolveu falha (ex.: execução `failed`) | o status e o erro informados pela Tess |
+| `Network` | não houve resposta (conexão caiu, DNS, proxy, certificado) | `No response from Tess (ECONNRESET): …` |
+| `Tess AI node` | o próprio node barrou (parâmetro inválido, Redis/fila, tempo limite) | o motivo |
+
+A descrição traz ainda `Request:` (método + endpoint), `Correlation ID` (quando a Tess envia), `Tess response:`
+com o **corpo bruto** da resposta e, separado, um `Node hint:` com a interpretação do node. Cada falha também vai
+para o log do n8n (`n8n.log`) em JSON: `source`, `request`, `status`, `tessMessage`, `tessResponse`.
+Com *Continue On Fail*, o item de erro traz `error`, `source` e `description`.
+
+Leituras (GET) que perdem a conexão são repetidas até 2 vezes; envios (POST/PUT/DELETE) não, para não duplicar
+a ação.
 
 ## Operações
 
